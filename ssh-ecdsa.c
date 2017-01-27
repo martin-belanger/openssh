@@ -34,6 +34,7 @@
 #include <openssl/ec.h>
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
+#include "evp-compat.h"
 
 #include <string.h>
 
@@ -80,9 +81,13 @@ ssh_ecdsa_sign(const struct sshkey *key, u_char **sigp, size_t *lenp,
 		ret = SSH_ERR_ALLOC_FAIL;
 		goto out;
 	}
-	if ((ret = sshbuf_put_bignum2(bb, sig->r)) != 0 ||
-	    (ret = sshbuf_put_bignum2(bb, sig->s)) != 0)
+{
+	const BIGNUM *pr, *ps;
+	ECDSA_SIG_get0(sig, &pr, &ps);
+	if ((ret = sshbuf_put_bignum2(bb, pr)) != 0 ||
+	    (ret = sshbuf_put_bignum2(bb, ps)) != 0)
 		goto out;
+}
 	if ((ret = sshbuf_put_cstring(b, sshkey_ssh_name_plain(key))) != 0 ||
 	    (ret = sshbuf_put_stringb(b, bb)) != 0)
 		goto out;
@@ -146,16 +151,39 @@ ssh_ecdsa_verify(const struct sshkey *key,
 		goto out;
 	}
 
-	/* parse signature */
+{	/* parse signature */
+	BIGNUM *pr, *ps;
+
+	ret = 0;
+	pr = BN_new();
+	ps = BN_new();
+	if ((pr == NULL) || (ps == NULL)) {
+		ret = SSH_ERR_ALLOC_FAIL;
+		goto parse_out;
+	}
+
+	if (sshbuf_get_bignum2(sigbuf, pr) != 0 ||
+	    sshbuf_get_bignum2(sigbuf, ps) != 0) {
+		ret = SSH_ERR_INVALID_FORMAT;
+		goto parse_out;
+	}
+
 	if ((sig = ECDSA_SIG_new()) == NULL) {
 		ret = SSH_ERR_ALLOC_FAIL;
+		goto parse_out;
+	}
+
+	if (!ECDSA_SIG_set0(sig, pr, ps))
+		ret = SSH_ERR_LIBCRYPTO_ERROR;
+
+parse_out:
+	if (ret != 0) {
+		BN_free(pr);
+		BN_free(ps);
 		goto out;
 	}
-	if (sshbuf_get_bignum2(sigbuf, sig->r) != 0 ||
-	    sshbuf_get_bignum2(sigbuf, sig->s) != 0) {
-		ret = SSH_ERR_INVALID_FORMAT;
-		goto out;
-	}
+}
+
 	if (sshbuf_len(sigbuf) != 0) {
 		ret = SSH_ERR_UNEXPECTED_TRAILING_DATA;
 		goto out;

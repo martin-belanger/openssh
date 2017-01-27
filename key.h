@@ -2,6 +2,8 @@
 
 /*
  * Copyright (c) 2000, 2001 Markus Friedl.  All rights reserved.
+ * X.509 certificates support,
+ * Copyright (c) 2002,2012 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -44,11 +46,13 @@ typedef struct sshkey Key;
 #define key_ssh_name		sshkey_ssh_name
 #define key_ssh_name_plain	sshkey_ssh_name_plain
 #define key_type_from_name	sshkey_type_from_name
+#define key_types_from_name	sshkey_types_from_name
 #define key_ecdsa_nid_from_name	sshkey_ecdsa_nid_from_name
 #define key_type_is_cert	sshkey_type_is_cert
 #define key_size		sshkey_size
 #define key_ecdsa_bits_to_nid	sshkey_ecdsa_bits_to_nid
 #define key_ecdsa_key_to_nid	sshkey_ecdsa_key_to_nid
+#define key_is_x509		sshkey_is_x509
 #define key_is_cert		sshkey_is_cert
 #define key_type_plain		sshkey_type_plain
 #define key_curve_name_to_nid	sshkey_curve_name_to_nid

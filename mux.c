@@ -691,7 +691,6 @@ process_mux_open_fwd(u_int rid, Channel *c, Buffer *m, Buffer *r)
 		connect_addr = NULL;
 	}
 
-	memset(&fwd, 0, sizeof(fwd));
 	fwd.listen_port = lport;
 	if (fwd.listen_port == PORT_STREAMLOCAL)
 		fwd.listen_path = listen_addr;
@@ -860,7 +859,6 @@ process_mux_close_fwd(u_int rid, Channel *c, Buffer *m, Buffer *r)
 		connect_addr = NULL;
 	}
 
-	memset(&fwd, 0, sizeof(fwd));
 	fwd.listen_port = lport;
 	if (fwd.listen_port == PORT_STREAMLOCAL)
 		fwd.listen_path = listen_addr;

@@ -11,10 +11,35 @@
  * software must be clearly marked as such, and if the derived work is
  * incompatible with the protocol description in the RFC file, it must be
  * called by a name other than "ssh" or "Secure Shell".
+ *
+ * X509 certificate support,
+ * Copyright (c) 2002-2006 Roumen Petrov.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef SERVCONF_H
 #define SERVCONF_H
+
+#include "x509store.h"
 
 #define MAX_PORTS		256	/* Max # ports. */
 
@@ -69,8 +94,10 @@ typedef struct {
 	int     num_host_cert_files;     /* Number of files for host certs. */
 	char   *host_key_agent;		 /* ssh-agent socket for host keys. */
 	char   *pid_file;	/* Where to put our pid */
+	int     server_key_bits;/* Size of the server key. */
 	int     login_grace_time;	/* Disconnect if no auth in this time
 					 * (sec). */
+	int     key_regeneration_time;	/* Server key lifetime (seconds). */
 	int     permit_root_login;	/* PERMIT_*, see above */
 	int     ignore_rhosts;	/* Ignore .rhosts and .shosts. */
 	int     ignore_user_known_hosts;	/* Ignore ~/.ssh/known_hosts
@@ -91,13 +118,17 @@ typedef struct {
 	char   *ciphers;	/* Supported SSH2 ciphers. */
 	char   *macs;		/* Supported SSH2 macs. */
 	char   *kex_algorithms;	/* SSH2 kex methods in order of preference. */
+	int	protocol;	/* Supported protocol versions. */
 	struct ForwardOptions fwd_opts;	/* forwarding options */
 	SyslogFacility log_facility;	/* Facility for system logging. */
 	LogLevel log_level;	/* Level for system logging. */
+	int     rhosts_rsa_authentication;	/* If true, permit rhosts RSA
+						 * authentication. */
 	int     hostbased_authentication;	/* If true, permit ssh2 hostbased auth */
 	int     hostbased_uses_name_from_packet_only; /* experimental */
 	char   *hostbased_key_types;	/* Key types allowed for hostbased */
 	char   *hostkeyalgorithms;	/* SSH2 server key types */
+	int     rsa_authentication;	/* If true, permit RSA authentication. */
 	int     pubkey_authentication;	/* If true, permit ssh2 pubkey authentication. */
 	char   *pubkey_key_types;	/* Key types allowed for public key */
 	int     kerberos_authentication;	/* If true, permit Kerberos
@@ -167,6 +198,23 @@ typedef struct {
 
 	int	use_pam;		/* Enable auth via PAM */
 
+	char*   hostbased_algorithms;	/* Allowed hostbased algorithms. */
+	char*   pubkey_algorithms;	/* Allowed pubkey algorithms. */
+
+	/* Supported X.509 key algorithms and signatures
+	   are defined is external source. */
+
+	/* sshd PKI(X509) flags */
+	SSH_X509Flags    x509flags;
+#ifndef SSH_X509STORE_DISABLED
+	/* sshd PKI(X509) system store */
+	X509StoreOptions ca;
+#endif /*ndef SSH_X509STORE_DISABLED*/
+#ifdef SSH_OCSP_ENABLED
+	/* ssh X.509 extra validation */
+	VAOptions va;
+#endif /*def SSH_OCSP_ENABLED*/
+
 	int	permit_tun;
 
 	int	num_permitted_opens;
@@ -219,8 +267,6 @@ struct connection_info {
 		M_CP_STROPT(authorized_principals_file); \
 		M_CP_STROPT(authorized_principals_command); \
 		M_CP_STROPT(authorized_principals_command_user); \
-		M_CP_STROPT(hostbased_key_types); \
-		M_CP_STROPT(pubkey_key_types); \
 		M_CP_STRARRAYOPT(authorized_keys_files, num_authkeys_files); \
 		M_CP_STRARRAYOPT(allow_users, num_allow_users); \
 		M_CP_STRARRAYOPT(deny_users, num_deny_users); \

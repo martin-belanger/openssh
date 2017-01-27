@@ -19,11 +19,18 @@
 #if !defined(HAVE_STATVFS) || !defined(HAVE_FSTATVFS)
 
 #include <sys/param.h>
+#ifdef HAVE_SYS_STATFS_H
+# include <sys/statfs.h>
+#endif
 #ifdef HAVE_SYS_MOUNT_H
 # include <sys/mount.h>
 #endif
 
 #include <errno.h>
+
+#ifndef MNAMELEN
+# define MNAMELEN 90
+#endif
 
 static void
 copy_statfs_to_statvfs(struct statvfs *to, struct statfs *from)

@@ -15,7 +15,11 @@
 #ifndef _MISC_H
 #define _MISC_H
 
-#include <sys/time.h>
+#include "config.h"
+
+#ifdef HAVE_SYS_TIME_H
+# include <sys/time.h>
+#endif
 
 /* Data structure for representing a forwarding request. */
 struct Forward {

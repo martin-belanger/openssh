@@ -347,7 +347,8 @@ key_load_public(const char *filename, char **commentp)
 	if ((r = sshkey_load_public(filename, &ret, commentp)) != 0) {
 		fatal_on_fatal_errors(r, __func__, SSH_ERR_LIBCRYPTO_ERROR);
 		/* Old authfile.c ignored all file errors. */
-		if (r == SSH_ERR_SYSTEM_ERROR)
+		if (r == SSH_ERR_SYSTEM_ERROR ||
+		    r == SSH_ERR_INVALID_FORMAT)
 			debug("%s: %s", __func__, ssh_err(r));
 		else
 			error("%s: %s", __func__, ssh_err(r));
@@ -388,6 +389,8 @@ key_load_private_cert(int type, const char *filename, const char *passphrase,
 		fatal_on_fatal_errors(r, __func__, SSH_ERR_LIBCRYPTO_ERROR);
 		/* Old authfile.c ignored all file errors. */
 		if (r == SSH_ERR_SYSTEM_ERROR ||
+		    r == SSH_ERR_INVALID_FORMAT ||
+		    r == SSH_ERR_INVALID_ARGUMENT ||
 		    r == SSH_ERR_KEY_WRONG_PASSPHRASE)
 			debug("%s: %s", __func__, ssh_err(r));
 		else
@@ -409,6 +412,8 @@ key_load_private_type(int type, const char *filename, const char *passphrase,
 		fatal_on_fatal_errors(r, __func__, SSH_ERR_LIBCRYPTO_ERROR);
 		/* Old authfile.c ignored all file errors. */
 		if (r == SSH_ERR_SYSTEM_ERROR ||
+		    r == SSH_ERR_INVALID_FORMAT ||
+		    r == SSH_ERR_INVALID_ARGUMENT ||
 		    (r == SSH_ERR_KEY_WRONG_PASSPHRASE))
 			debug("%s: %s", __func__, ssh_err(r));
 		else

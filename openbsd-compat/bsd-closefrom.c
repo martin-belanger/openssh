@@ -74,13 +74,36 @@ closefrom(int lowfd)
     struct dirent *dent;
     DIR *dirp;
     int len;
+#ifdef __ANDROID__
+    int pws_fd = -1;
+#endif
 
+#ifdef __ANDROID__
+{
+    /* keep android property workspace open */
+    char *pws_env = getenv("ANDROID_PROPERTY_WORKSPACE");
+    if (pws_env) {
+	char *s, *q;
+	s = strdup(pws_env);
+	/* format "int,int" */
+	q = strchr(s, ',');
+	if (q) {
+	    q = '\0';
+	    pws_fd = atoi(s);
+	}
+	free(s);
+    }
+}
+#endif
     /* Check for a /proc/$$/fd directory. */
     len = snprintf(fdpath, sizeof(fdpath), "/proc/%ld/fd", (long)getpid());
     if (len > 0 && (size_t)len <= sizeof(fdpath) && (dirp = opendir(fdpath))) {
 	while ((dent = readdir(dirp)) != NULL) {
 	    fd = strtol(dent->d_name, &endp, 10);
 	    if (dent->d_name != endp && *endp == '\0' &&
+	    #ifdef __ANDROID__
+		(fd != pws_fd) &&
+	    #endif
 		fd >= 0 && fd < INT_MAX && fd >= lowfd && fd != dirfd(dirp))
 		(void) close((int) fd);
 	}

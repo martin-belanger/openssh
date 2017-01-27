@@ -123,6 +123,9 @@ const struct ssh_digest digests[SSH_DIGEST_MAX] = {
 static const struct ssh_digest *
 ssh_digest_by_alg(int alg)
 {
+#ifdef OPENSSL_FIPS
+#  include "use openssl based digest for FIPS build"
+#endif
 	if (alg < 0 || alg >= SSH_DIGEST_MAX)
 		return NULL;
 	if (digests[alg].id != alg) /* sanity */

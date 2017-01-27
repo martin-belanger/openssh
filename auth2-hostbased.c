@@ -1,6 +1,8 @@
 /* $OpenBSD: auth2-hostbased.c,v 1.26 2016/03/07 19:02:43 djm Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
+ * X.509 certificates support,
+ * Copyright (c) 2004,2011,2013 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -40,6 +42,7 @@
 #include "servconf.h"
 #include "compat.h"
 #include "key.h"
+#include "ssh-x509.h"
 #include "hostfile.h"
 #include "auth.h"
 #include "canohost.h"
@@ -54,6 +57,8 @@
 extern ServerOptions options;
 extern u_char *session_id2;
 extern u_int session_id2_len;
+
+static int hostbased_algorithm_allowed(const char* pkalg);
 
 static int
 userauth_hostbased(Authctxt *authctxt)
@@ -92,7 +97,12 @@ userauth_hostbased(Authctxt *authctxt)
 		    "public key algorithm: %s", pkalg);
 		goto done;
 	}
-	key = key_from_blob(pkblob, blen);
+	if (!hostbased_algorithm_allowed(pkalg)) {
+		debug("userauth_hostbased: disallowed "
+		    "public key algorithm: %s", pkalg);
+		goto done;
+	}
+	key = xkey_from_blob(pkalg, pkblob, blen);
 	if (key == NULL) {
 		error("userauth_hostbased: cannot decode key: %s", pkalg);
 		goto done;
@@ -106,12 +116,6 @@ userauth_hostbased(Authctxt *authctxt)
 	    (datafellows & SSH_BUG_RSASIGMD5) != 0) {
 		error("Refusing RSA key because peer uses unsafe "
 		    "signature format");
-		goto done;
-	}
-	if (match_pattern_list(sshkey_ssh_name(key),
-	    options.hostbased_key_types, 0) != 1) {
-		logit("%s: key type %s not in HostbasedAcceptedKeyTypes",
-		    __func__, sshkey_type(key));
 		goto done;
 	}
 
@@ -153,6 +157,15 @@ done:
 	free(chost);
 	free(sig);
 	return authenticated;
+}
+
+/* return 1 if given hostbased algorithm is allowed */
+static int
+hostbased_algorithm_allowed(const char* pkalg)
+{
+	if (options.hostbased_algorithms == NULL) return(1);
+
+	return(match_pattern_list(pkalg, options.hostbased_algorithms, 0) == 1);
 }
 
 /* return 1 if given hostkey is allowed */

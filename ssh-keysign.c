@@ -40,11 +40,14 @@
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <openssl/rsa.h>
+#include "openbsd-compat/openssl-compat.h"
 #endif
 
 #include "xmalloc.h"
 #include "log.h"
 #include "sshkey.h"
+#include "ssh-x509.h"
+#include "ssh-xkalg.h"
 #include "ssh.h"
 #include "ssh2.h"
 #include "misc.h"
@@ -55,7 +58,6 @@
 #include "pathnames.h"
 #include "readconf.h"
 #include "uidswap.h"
-#include "sshkey.h"
 #include "ssherr.h"
 
 struct ssh *active_state = NULL; /* XXX needed for linking */
@@ -66,6 +68,57 @@ extern char *__progname;
 uid_t original_real_uid;
 
 extern char *__progname;
+
+/* used in ssh-x509.c */
+extern STACK_OF(X509)* (*pssh_x509store_build_certchain)(X509 *cert, STACK_OF(X509) *untrusted);
+
+/* minimize OCSP dependencies */
+#ifdef SSH_OCSP_ENABLED
+
+#if 1	/* used in readconf.c */
+
+void
+ssh_set_validator(const VAOptions *_va) {
+	(void)_va;
+	return;
+}
+
+int
+ssh_get_default_vatype(void) {
+	return(SSHVA_NONE);
+}
+
+int
+ssh_get_vatype_s(const char* type) {
+	(void)type;
+	return(-1);
+}
+
+const char*
+ssh_get_vatype_i(int id) {
+	(void)id;
+	return(NULL);
+}
+
+#endif	/* end of used in readconf.c */
+#endif /*def SSH_OCSP_ENABLED*/
+
+
+#if 1	/* used in x509store.c */
+int
+ssh_ocsp_validate(X509 *cert, X509_STORE *x509store) {
+	(void)cert;
+	(void)x509store;
+	return(-1);
+}
+
+X509_LOOKUP_METHOD* X509_LOOKUP_ldap(void);
+X509_LOOKUP_METHOD*
+X509_LOOKUP_ldap(void) {
+	return(NULL);
+}
+#endif	/* end of used in x509store.c */
+
 
 static int
 valid_request(struct passwd *pw, char *host, struct sshkey **ret,
@@ -123,7 +176,7 @@ valid_request(struct passwd *pw, char *host, struct sshkey **ret,
 	pktype = sshkey_type_from_name(pkalg);
 	if (pktype == KEY_UNSPEC)
 		fail++;
-	else if ((r = sshkey_from_blob(pkblob, blen, &key)) != 0) {
+	else if ((r = Xkey_from_blob(pkalg, pkblob, blen, &key)) != 0) {
 		error("%s: bad key blob: %s", __func__, ssh_err(r));
 		fail++;
 	} else if (key->type != pktype)
@@ -183,6 +236,7 @@ main(int argc, char **argv)
 #endif
 
 	ssh_malloc_init();	/* must be called before any mallocs */
+	__progname = ssh_get_progname(argv[0]);
 	if (pledge("stdio rpath getpw dns id", NULL) != 0)
 		fatal("%s: pledge: %s", __progname, strerror(errno));
 
@@ -192,6 +246,18 @@ main(int argc, char **argv)
 	/* Leave /dev/null fd iff it is attached to stderr */
 	if (fd > 2)
 		close(fd);
+
+	ssh_OpenSSL_startup();
+	fill_default_xkalg();
+{
+	X509StoreOptions ca;
+
+	X509StoreOptions_init(&ca);
+	X509StoreOptions_system_defaults(&ca);
+	ssh_x509store_addlocations(&ca);
+	X509StoreOptions_reset(&ca);
+}
+	pssh_x509store_build_certchain = ssh_x509store_build_certchain;
 
 	i = 0;
 	/* XXX This really needs to read sshd_config for the paths */
@@ -229,7 +295,6 @@ main(int argc, char **argv)
 		fatal("could not open any host key");
 
 #ifdef WITH_OPENSSL
-	OpenSSL_add_all_algorithms();
 	arc4random_buf(rnd, sizeof(rnd));
 	RAND_seed(rnd, sizeof(rnd));
 #endif

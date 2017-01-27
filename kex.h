@@ -2,6 +2,8 @@
 
 /*
  * Copyright (c) 2000, 2001 Markus Friedl.  All rights reserved.
+ * X.509 certificates support,
+ * Copyright (c) 2014 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -136,8 +138,6 @@ struct kex {
 	int	server;
 	char	*name;
 	char	*hostkey_alg;
-	int	hostkey_type;
-	int	hostkey_nid;
 	u_int	kex_type;
 	int	rsa_sha2;
 	int	ext_info_c;
@@ -151,8 +151,8 @@ struct kex {
 	char	*server_version_string;
 	char	*failed_choice;
 	int	(*verify_host_key)(struct sshkey *, struct ssh *);
-	struct sshkey *(*load_host_public_key)(int, int, struct ssh *);
-	struct sshkey *(*load_host_private_key)(int, int, struct ssh *);
+	struct sshkey *(*find_host_public_key)(const char* pkalg, struct ssh *);
+	struct sshkey *(*find_host_private_key)(const char* pkalg, struct ssh *);
 	int	(*host_key_index)(struct sshkey *, int, struct ssh *);
 	int	(*sign)(struct sshkey *, struct sshkey *, u_char **, size_t *,
 	    const u_char *, size_t, const char *, u_int);
@@ -187,6 +187,9 @@ int	 kex_derive_keys(struct ssh *, u_char *, u_int, const struct sshbuf *);
 int	 kex_derive_keys_bn(struct ssh *, u_char *, u_int, const BIGNUM *);
 int	 kex_send_newkeys(struct ssh *);
 int	 kex_start_rekex(struct ssh *);
+
+int	 kex_load_host_keys(struct kex *kex, struct ssh *ssh, struct sshkey **hostpub, struct sshkey **hostpriv);
+
 
 int	 kexdh_client(struct ssh *);
 int	 kexdh_server(struct ssh *);
@@ -226,7 +229,7 @@ int	kexc25519_shared_key(const u_char key[CURVE25519_SIZE],
 	__attribute__((__bounded__(__minbytes__, 2, CURVE25519_SIZE)));
 
 int
-derive_ssh1_session_id(BIGNUM *, BIGNUM *, u_int8_t[8], u_int8_t[16]);
+derive_ssh1_session_id(const BIGNUM *, const BIGNUM *, u_int8_t[8], u_int8_t[16]);
 
 #if defined(DEBUG_KEX) || defined(DEBUG_KEXDH) || defined(DEBUG_KEXECDH)
 void	dump_digest(char *, u_char *, int);

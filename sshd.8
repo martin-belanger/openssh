@@ -1,3 +1,11 @@
+.\" Implement .Dd with the Mdocdate RCS keyword
+.rn Dd xD
+.de Dd
+.ie \\$1$Mdocdate: \{\
+.	xD \\$2 \\$3, \\$4
+.\}
+.el .xD \\$1 \\$2 \\$3 \\$4 \\$5 \\$6 \\$7 \\$8
+..
 .\"
 .\" Author: Tatu Ylonen <ylo@cs.hut.fi>
 .\" Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -12,6 +20,7 @@
 .\" Copyright (c) 1999,2000 Markus Friedl.  All rights reserved.
 .\" Copyright (c) 1999 Aaron Campbell.  All rights reserved.
 .\" Copyright (c) 1999 Theo de Raadt.  All rights reserved.
+.\" Copyright (c) 2002-2016 Roumen Petrov.  All rights reserved.
 .\"
 .\" Redistribution and use in source and binary forms, with or without
 .\" modification, are permitted provided that the following conditions
@@ -44,12 +53,14 @@
 .Nm sshd
 .Bk -words
 .Op Fl 46DdeiqTt
+.Op Fl b Ar bits
 .Op Fl C Ar connection_spec
 .Op Fl c Ar host_certificate_file
 .Op Fl E Ar log_file
 .Op Fl f Ar config_file
 .Op Fl g Ar login_grace_time
 .Op Fl h Ar host_key_file
+.Op Fl k Ar key_gen_time
 .Op Fl o Ar option
 .Op Fl p Ar port
 .Op Fl u Ar len
@@ -94,6 +105,9 @@ to use IPv4 addresses only.
 Forces
 .Nm
 to use IPv6 addresses only.
+.It Fl b Ar bits
+Specifies the number of bits in the ephemeral protocol version 1
+server key (default 1024).
 .It Fl C Ar connection_spec
 Specify the connection parameters to use for the
 .Fl T
@@ -164,18 +178,44 @@ This option must be given if
 is not run as root (as the normal
 host key files are normally not readable by anyone but root).
 The default is
+.Pa /etc/ssh/ssh_host_key
+for protocol version 1, and
 .Pa /etc/ssh/ssh_host_dsa_key ,
-.Pa /etc/ssh/ssh_host_ecdsa_key ,
+.Pa /etc/ssh/ssh_host_ecdsa_key .
 .Pa /etc/ssh/ssh_host_ed25519_key
 and
-.Pa /etc/ssh/ssh_host_rsa_key .
+.Pa /etc/ssh/ssh_host_rsa_key
+for protocol version 2.
 It is possible to have multiple host key files for
-the different host key algorithms.
+the different protocol versions and host key algorithms.
+.Pp
+Host key for protocol version 2 may contain
+X.509 certificate that match private key.
+For x509v3-ecdsa-sha2-* public key algorithms, file
+with ECDSA key may contain extra X.509 certificates.
+Extra certificates along with certificates from X.509 store
+are used to build chain of certificates leading to
+a trusted certificate authority.
 .It Fl i
 Specifies that
 .Nm
 is being run from
 .Xr inetd 8 .
+If SSH protocol 1 is enabled,
+.Nm
+should not  normally be run
+from inetd because it needs to generate the server key before it can
+respond to the client, and this may take some time.
+Clients may have to wait too long if the key was regenerated every time.
+.It Fl k Ar key_gen_time
+Specifies how often the ephemeral protocol version 1 server key is
+regenerated (default 3600 seconds, or one hour).
+The motivation for regenerating the key fairly
+often is that the key is not stored anywhere, and after about an hour
+it becomes impossible to recover the key for decrypting intercepted
+communications even if the machine is cracked into or physically
+seized.
+A value of zero indicates that the key will never be regenerated.
 .It Fl o Ar option
 Can be used to give options in the format used in the configuration file.
 This is useful for specifying options for which there is no separate
@@ -234,7 +274,8 @@ may also be used to prevent
 from making DNS requests unless the authentication
 mechanism or configuration requires it.
 Authentication mechanisms that may require DNS include
-.Cm HostbasedAuthentication
+.Cm RhostsRSAAuthentication ,
+.Cm HostbasedAuthentication ,
 and using a
 .Cm from="pattern-list"
 option in a key file.
@@ -245,14 +286,42 @@ or
 .Cm DenyUsers .
 .El
 .Sh AUTHENTICATION
-The OpenSSH SSH daemon supports SSH protocol 2 only.
+The OpenSSH SSH daemon supports SSH protocols 1 and 2.
+The default is to use protocol 2 only,
+though this can be changed via the
+.Cm Protocol
+option in
+.Xr sshd_config 5 .
+Protocol 1 should not be used
+and is only offered to support legacy devices.
+.Pp
 Each host has a host-specific key,
 used to identify the host.
+Partial forward security for protocol 1 is provided through
+an additional server key,
+normally 1024 bits,
+generated when the server starts.
+This key is normally regenerated every hour if it has been used, and
+is never stored on disk.
 Whenever a client connects, the daemon responds with its public
-host key.
+host and server keys.
 The client compares the
-host key against its own database to verify that it has not changed.
-Forward security is provided through a Diffie-Hellman key agreement.
+RSA host key against its own database to verify that it has not changed.
+The client then generates a 256-bit random number.
+It encrypts this
+random number using both the host key and the server key, and sends
+the encrypted number to the server.
+Both sides then use this
+random number as a session key which is used to encrypt all further
+communications in the session.
+The rest of the session is encrypted
+using a conventional cipher, currently Blowfish or 3DES, with 3DES
+being used by default.
+The client selects the encryption algorithm
+to use from those offered by the server.
+.Pp
+For protocol 2,
+forward security is provided through a Diffie-Hellman key agreement.
 This key agreement results in a shared session key.
 The rest of the session is encrypted using a symmetric cipher, currently
 128-bit AES, Blowfish, 3DES, CAST128, Arcfour, 192-bit AES, or 256-bit AES.
@@ -420,30 +489,74 @@ if this option is not specified, the default is
 .Pa ~/.ssh/authorized_keys
 and
 .Pa ~/.ssh/authorized_keys2 .
+For protocol version 2 keys file may contain X.509 certificates
+or X.509 certificate
+.Dq "Distinguished Name" .
 Each line of the file contains one
 key (empty lines and lines starting with a
 .Ql #
 are ignored as
 comments).
-Public keys consist of the following space-separated fields:
+Protocol 1 public keys consist of the following space-separated fields:
+options, bits, exponent, modulus, comment.
+Protocol 2 public key consist of:
 options, keytype, base64-encoded key, comment.
-The options field is optional.
-The keytype is
+The options field is optional;
+its presence is determined by whether the line starts
+with a number or not (the options field never starts with a number).
+The bits, exponent, modulus, and comment fields give the RSA key for
+protocol version 1; the
+comment field is not used for anything (but may be convenient for the
+user to identify the key).
+For protocol version 2 the keytype is
 .Dq ecdsa-sha2-nistp256 ,
 .Dq ecdsa-sha2-nistp384 ,
 .Dq ecdsa-sha2-nistp521 ,
 .Dq ssh-ed25519 ,
 .Dq ssh-dss
 or
-.Dq ssh-rsa ;
-the comment field is not used for anything (but may be convenient for the
-user to identify the key).
+.Dq ssh-rsa .
+In addition, for protocol version 2 user can use X.509 certificates.
+In this case keytype is
+.Dq x509v3-sign-rsa ,
+.Dq x509v3-ecdsa-sha2-nistp256 ,
+.Dq x509v3-ecdsa-sha2-nistp384 ,
+.Dq x509v3-ecdsa-sha2-nistp521 ,
+or
+.Dq x509v3-sign-dss .
+Instead of
+.Dq "base64 encoded key"
+line must contain base64 encoded X.509 certicate (old style) or
+a keyword (new style), optionally followed by symbol
+.Sq =
+(equal) or
+.Sq \&:
+(colon), zero or more spaces and X.509 certificate
+.Dq "Distinguished Name"
+(Subject). Keyword is case insensitive and can be one of
+.Sq Subject
+,
+.Sq "Distinguished Name"
+,
+.Sq Distinguished-Name
+,
+.Sq Distinguished_Name
+,
+.Sq DistinguishedName
+or
+.Sq DN .
+Separator of Subject items can be
+.Sq /
+(slash),
+.Sq \&,
+(comma) or mixed and order is not important.
 .Pp
-Note that lines in this file can be several hundred bytes long
+Note that lines in this file are usually several hundred bytes long
 (because of the size of the public key encoding) up to a limit of
 8 kilobytes, which permits DSA keys up to 8 kilobits and RSA
 keys up to 16 kilobits.
 You don't want to type them in; instead, copy the
+.Pa identity.pub ,
 .Pa id_dsa.pub ,
 .Pa id_ecdsa.pub ,
 .Pa id_ed25519.pub ,
@@ -452,7 +565,8 @@ or the
 file and edit it.
 .Pp
 .Nm
-enforces a minimum RSA key modulus size of 768 bits.
+enforces a minimum RSA key modulus size for protocol 1
+and protocol 2 keys of 768 bits.
 .Pp
 The options (if present) consist of comma-separated option
 specifications.
@@ -616,6 +730,7 @@ command="dump /home",no-pty,no-port-forwarding ssh-dss
 AAAAC3...51R== example.net
 permitopen="192.0.2.1:80",permitopen="192.0.2.2:25" ssh-dss
 AAAAB5...21S==
+x509v3-sign-dss subject=/C=XX/ST=World/O=OpenSSH Test Team...
 tunnel="0",command="sh /etc/netstart tun0" ssh-rsa AAAA...==
 jane@example.net
 restrict,command="uptime" ssh-rsa AAAA1C8...32Tv==
@@ -628,14 +743,16 @@ The
 .Pa /etc/ssh/ssh_known_hosts
 and
 .Pa ~/.ssh/known_hosts
-files contain host public keys for all known hosts.
+files contain host public keys, X.509 certificates (old style) or X.509 certificate
+.Dq "Distinguished Name"
+for all known hosts.
 The global file should
 be prepared by the administrator (optional), and the per-user file is
 maintained automatically: whenever the user connects from an unknown host,
 its key is added to the per-user file.
 .Pp
 Each line in these files contains the following fields: markers (optional),
-hostnames, keytype, base64-encoded key, comment.
+hostnames, bits, exponent, modulus, comment.
 The fields are separated by spaces.
 .Pp
 The marker is optional, but if it is present then it must be one of
@@ -676,9 +793,9 @@ character.
 Only one hashed hostname may appear on a single line and none of the above
 negation or wildcard operators may be applied.
 .Pp
-The keytype and base64-encoded key are taken directly from the host key; they
+Bits, exponent, and modulus are taken directly from the RSA host key; they
 can be obtained, for example, from
-.Pa /etc/ssh/ssh_host_rsa_key.pub .
+.Pa /etc/ssh/ssh_host_key.pub .
 The optional comment field continues to the end of the line, and is not used.
 .Pp
 Lines starting with
@@ -717,8 +834,8 @@ Note that the lines in these files are typically hundreds of characters
 long, and you definitely don't want to type in the host keys by hand.
 Rather, generate them by a script,
 .Xr ssh-keyscan 1
-or by taking, for example,
-.Pa /etc/ssh/ssh_host_rsa_key.pub
+or by taking
+.Pa /etc/ssh/ssh_host_key.pub
 and adding the host names at the front.
 .Xr ssh-keygen 1
 also offers some basic automated editing for
@@ -731,6 +848,7 @@ An example ssh_known_hosts file:
 # Comments allowed at start of line
 closenet,...,192.0.2.53 1024 37 159...93 closenet.example.net
 cvs.example.net,192.0.2.10 ssh-rsa AAAA1234.....=
+x509host x509v3-sign-rsa Subject:/C=XX.....
 # A hashed hostname
 |1|JfKTdBh7rNbXkVAQCRp4OQoPfmI=|USECr3SWf1JUPsms5AqfD5QfxkM= ssh-rsa
 AAAA1234.....=
@@ -782,7 +900,10 @@ secret, but the recommended permissions are read/write/execute for the user,
 and not accessible by others.
 .Pp
 .It Pa ~/.ssh/authorized_keys
-Lists the public keys (DSA, ECDSA, Ed25519, RSA)
+Lists the public keys (DSA, ECDSA, Ed25519, RSA),
+X.509 certificates or X.509 certificate
+.Dq Distinguished Names
+(recommended)
 that can be used for logging in as this user.
 The format of this file is described above.
 The content of the file is not highly sensitive, but the recommended
@@ -813,7 +934,7 @@ controlled via the
 option.
 .Pp
 .It Pa ~/.ssh/known_hosts
-Contains a list of host keys for all hosts the user has logged into
+Contains a list of host keys or X.509 certificates for all hosts the user has logged into
 that are not already in the systemwide list of known host keys.
 The format of this file is described above.
 This file should be writable only by root/the owner and
@@ -824,6 +945,12 @@ Contains initialization routines to be run before
 the user's home directory becomes accessible.
 This file should be writable only by the user, and need not be
 readable by anyone else.
+.Pp
+.It Pa /etc/hosts.allow
+.It Pa /etc/hosts.deny
+Access controls that should be enforced by tcp-wrappers are defined here.
+Further details are described in
+.Xr hosts_access 5 .
 .Pp
 .It Pa /etc/hosts.equiv
 This file is for host-based authentication (see
@@ -857,17 +984,39 @@ This file is used in exactly the same way as
 but allows host-based authentication without permitting login with
 rlogin/rsh.
 .Pp
+.It Pa /etc/ssh/ca/ca-bundle.crt
+.It Pa /etc/ssh/ca/ca-bundle.crl
+The first file contain multiple X.509 certificates and the second
+.Dq "Certificate Revocation List"
+(CRLs) of certificate signers in PEM format concatenated together.
+Used to verify and validate client X.509 certificate.
+.Pp
+.It Pa /etc/ssh/ca/crt
+.It Pa /etc/ssh/ca/crl
+.Dq "Hash dirs"
+with X.509 certificates, the first directory or CLRs, the second, of
+X.509 certificate signers.
+Each X.509 certificate should be stored in separate file with name
+[HASH].[NUMBER] or [HASH].r[NUMBER] for the CRL, where [HASH] is
+X.509 certificate or CRL hash value and [NUMBER] is an integer starting
+from zero.
+Used to verify and validate client X.509 certificate.
+.Pp
+.It Pa /etc/ssh/ssh_host_key
 .It Pa /etc/ssh/ssh_host_dsa_key
 .It Pa /etc/ssh/ssh_host_ecdsa_key
 .It Pa /etc/ssh/ssh_host_ed25519_key
 .It Pa /etc/ssh/ssh_host_rsa_key
 These files contain the private parts of the host keys.
+For protocol version 2 keys file may contain private part
+and X.509 certificate that match it.
 These files should only be owned by root, readable only by root, and not
 accessible to others.
 Note that
 .Nm
 does not start if these files are group/world-accessible.
 .Pp
+.It Pa /etc/ssh/ssh_host_key.pub
 .It Pa /etc/ssh/ssh_host_dsa_key.pub
 .It Pa /etc/ssh/ssh_host_ecdsa_key.pub
 .It Pa /etc/ssh/ssh_host_ed25519_key.pub
@@ -876,6 +1025,8 @@ These files contain the public parts of the host keys.
 These files should be world-readable but writable only by
 root.
 Their contents should match the respective private parts.
+Note that when corresponding host key contain X.509 certificate
+these files must contains that certificate.
 These files are not
 really used for anything; they are provided for the convenience of
 the user so their contents can be copied to known hosts files.
@@ -885,7 +1036,7 @@ These files are created using
 .It Pa /etc/ssh/ssh_known_hosts
 Systemwide list of known host keys.
 This file should be prepared by the
-system administrator to contain the public host keys of all machines in the
+system administrator to contain the public host keys or X.509 certificates of all machines in the
 organization.
 The format of this file is described above.
 This file should be writable only by root/the owner and
@@ -929,6 +1080,7 @@ The content of this file is not sensitive; it can be world-readable.
 .Xr ssh-keygen 1 ,
 .Xr ssh-keyscan 1 ,
 .Xr chroot 2 ,
+.Xr hosts_access 5 ,
 .Xr login.conf 5 ,
 .Xr moduli 5 ,
 .Xr sshd_config 5 ,
@@ -945,3 +1097,15 @@ Markus Friedl contributed the support for SSH
 protocol versions 1.5 and 2.0.
 Niels Provos and Markus Friedl contributed support
 for privilege separation.
+Roumen Petrov contributed support for X.509 certificates.
+.Sh CAVEATS
+System security is not improved unless
+.Nm rshd ,
+.Nm rlogind ,
+and
+.Nm rexecd
+are disabled (thus completely disabling
+.Xr rlogin
+and
+.Xr rsh
+into the machine).

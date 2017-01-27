@@ -9,6 +9,29 @@
  * software must be clearly marked as such, and if the derived work is
  * incompatible with the protocol description in the RFC file, it must be
  * called by a name other than "ssh" or "Secure Shell".
+ *
+ * X509 certificate support,
+ * Copyright (c) 2002-2006 Roumen Petrov.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "includes.h"
@@ -42,6 +65,7 @@
 #include "buffer.h"
 #include "misc.h"
 #include "servconf.h"
+#include "ssh-xkalg.h"
 #include "compat.h"
 #include "pathnames.h"
 #include "cipher.h"
@@ -75,6 +99,19 @@ initialize_server_options(ServerOptions *options)
 	/* Portable-specific options */
 	options->use_pam = -1;
 
+	/* X.509 Standard Options */
+	options->hostbased_algorithms = NULL;
+	options->pubkey_algorithms = NULL;
+	ssh_x509flags_initialize(&options->x509flags, 1);
+#ifndef SSH_X509STORE_DISABLED
+	X509StoreOptions_init(&options->ca);
+#endif /*ndef SSH_X509STORE_DISABLED*/
+#ifdef SSH_OCSP_ENABLED
+	options->va.type = -1;
+	options->va.certificate_file = NULL;
+	options->va.responder_url = NULL;
+#endif /*def SSH_OCSP_ENABLED*/
+
 	/* Standard Options */
 	options->num_ports = 0;
 	options->ports_from_cmdline = 0;
@@ -86,7 +123,9 @@ initialize_server_options(ServerOptions *options)
 	options->num_host_cert_files = 0;
 	options->host_key_agent = NULL;
 	options->pid_file = NULL;
+	options->server_key_bits = -1;
 	options->login_grace_time = -1;
+	options->key_regeneration_time = -1;
 	options->permit_root_login = PERMIT_NOT_SET;
 	options->ignore_rhosts = -1;
 	options->ignore_user_known_hosts = -1;
@@ -102,10 +141,12 @@ initialize_server_options(ServerOptions *options)
 	options->tcp_keep_alive = -1;
 	options->log_facility = SYSLOG_FACILITY_NOT_SET;
 	options->log_level = SYSLOG_LEVEL_NOT_SET;
+	options->rhosts_rsa_authentication = -1;
 	options->hostbased_authentication = -1;
 	options->hostbased_uses_name_from_packet_only = -1;
 	options->hostbased_key_types = NULL;
 	options->hostkeyalgorithms = NULL;
+	options->rsa_authentication = -1;
 	options->pubkey_authentication = -1;
 	options->pubkey_key_types = NULL;
 	options->kerberos_authentication = -1;
@@ -133,6 +174,7 @@ initialize_server_options(ServerOptions *options)
 	options->ciphers = NULL;
 	options->macs = NULL;
 	options->kex_algorithms = NULL;
+	options->protocol = SSH_PROTO_UNKNOWN;
 	options->fwd_opts.gateway_ports = -1;
 	options->fwd_opts.streamlocal_bind_mask = (mode_t)-1;
 	options->fwd_opts.streamlocal_bind_unlink = -1;
@@ -173,20 +215,6 @@ option_clear_or_none(const char *o)
 	return o == NULL || strcasecmp(o, "none") == 0;
 }
 
-static void
-assemble_algorithms(ServerOptions *o)
-{
-	if (kex_assemble_names(KEX_SERVER_ENCRYPT, &o->ciphers) != 0 ||
-	    kex_assemble_names(KEX_SERVER_MAC, &o->macs) != 0 ||
-	    kex_assemble_names(KEX_SERVER_KEX, &o->kex_algorithms) != 0 ||
-	    kex_assemble_names(KEX_DEFAULT_PK_ALG,
-	    &o->hostkeyalgorithms) != 0 ||
-	    kex_assemble_names(KEX_DEFAULT_PK_ALG,
-	    &o->hostbased_key_types) != 0 ||
-	    kex_assemble_names(KEX_DEFAULT_PK_ALG, &o->pubkey_key_types) != 0)
-		fatal("kex_assemble_names failed");
-}
-
 void
 fill_default_server_options(ServerOptions *options)
 {
@@ -196,19 +224,50 @@ fill_default_server_options(ServerOptions *options)
 	if (options->use_pam == -1)
 		options->use_pam = 0;
 
+	/* X.509 Standard Options */
+#ifdef OPENSSL_FIPS
+	if (FIPS_mode()) {
+		if (options->ciphers == NULL)
+			options->ciphers = only_fips_valid_ciphers(KEX_SERVER_ENCRYPT);
+		if (options->macs == NULL)
+			options->macs = only_fips_valid_macs(KEX_SERVER_MAC);
+	}
+#endif
+	/* options->hostbased_algorithms */
+	/* options->pubkey_algorithms */
+	fill_default_xkalg();
+	ssh_x509flags_defaults(&options->x509flags);
+	memcpy(&ssh_x509flags, &options->x509flags, sizeof(ssh_x509flags));
+#ifndef SSH_X509STORE_DISABLED
+	X509StoreOptions_system_defaults(&options->ca);
+	ssh_x509store_addlocations(&options->ca);
+#endif /*ndef SSH_X509STORE_DISABLED*/
+#ifdef SSH_OCSP_ENABLED
+	if (options->va.type == -1)
+		options->va.type = ssh_get_default_vatype();
+	ssh_set_validator(&options->va);
+#endif /*def SSH_OCSP_ENABLED*/
+
 	/* Standard Options */
+	if (options->protocol == SSH_PROTO_UNKNOWN)
+		options->protocol = SSH_PROTO_2;
 	if (options->num_host_key_files == 0) {
 		/* fill default hostkeys for protocols */
-		options->host_key_files[options->num_host_key_files++] =
-		    _PATH_HOST_RSA_KEY_FILE;
-		options->host_key_files[options->num_host_key_files++] =
-		    _PATH_HOST_DSA_KEY_FILE;
+		if (options->protocol & SSH_PROTO_1)
+			options->host_key_files[options->num_host_key_files++] =
+			    _PATH_HOST_KEY_FILE;
+		if (options->protocol & SSH_PROTO_2) {
+			options->host_key_files[options->num_host_key_files++] =
+			    _PATH_HOST_RSA_KEY_FILE;
+			options->host_key_files[options->num_host_key_files++] =
+			    _PATH_HOST_DSA_KEY_FILE;
 #ifdef OPENSSL_HAS_ECC
-		options->host_key_files[options->num_host_key_files++] =
-		    _PATH_HOST_ECDSA_KEY_FILE;
+			options->host_key_files[options->num_host_key_files++] =
+			    _PATH_HOST_ECDSA_KEY_FILE;
 #endif
-		options->host_key_files[options->num_host_key_files++] =
-		    _PATH_HOST_ED25519_KEY_FILE;
+			options->host_key_files[options->num_host_key_files++] =
+			    _PATH_HOST_ED25519_KEY_FILE;
+		}
 	}
 	/* No certificates by default */
 	if (options->num_ports == 0)
@@ -219,8 +278,12 @@ fill_default_server_options(ServerOptions *options)
 		add_listen_addr(options, NULL, 0);
 	if (options->pid_file == NULL)
 		options->pid_file = xstrdup(_PATH_SSH_DAEMON_PID_FILE);
+	if (options->server_key_bits == -1)
+		options->server_key_bits = 1024;
 	if (options->login_grace_time == -1)
 		options->login_grace_time = 120;
+	if (options->key_regeneration_time == -1)
+		options->key_regeneration_time = 3600;
 	if (options->permit_root_login == PERMIT_NOT_SET)
 		options->permit_root_login = PERMIT_NO_PASSWD;
 	if (options->ignore_rhosts == -1)
@@ -251,10 +314,16 @@ fill_default_server_options(ServerOptions *options)
 		options->log_facility = SYSLOG_FACILITY_AUTH;
 	if (options->log_level == SYSLOG_LEVEL_NOT_SET)
 		options->log_level = SYSLOG_LEVEL_INFO;
+	if (options->rhosts_rsa_authentication == -1)
+		options->rhosts_rsa_authentication = 0;
 	if (options->hostbased_authentication == -1)
 		options->hostbased_authentication = 0;
 	if (options->hostbased_uses_name_from_packet_only == -1)
 		options->hostbased_uses_name_from_packet_only = 0;
+	if (options->hostkeyalgorithms == NULL)
+		options->hostkeyalgorithms = xstrdup("*");
+	if (options->rsa_authentication == -1)
+		options->rsa_authentication = 1;
 	if (options->pubkey_authentication == -1)
 		options->pubkey_authentication = 1;
 	if (options->kerberos_authentication == -1)
@@ -334,7 +403,10 @@ fill_default_server_options(ServerOptions *options)
 	if (options->disable_forwarding == -1)
 		options->disable_forwarding = 0;
 
-	assemble_algorithms(options);
+	if (kex_assemble_names(KEX_SERVER_ENCRYPT, &options->ciphers) != 0 ||
+	    kex_assemble_names(KEX_SERVER_MAC, &options->macs) != 0 ||
+	    kex_assemble_names(KEX_SERVER_KEX, &options->kex_algorithms) != 0)
+		fatal("%s: kex_assemble_names failed", __func__);
 
 	/* Turn privilege separation and sandboxing on by default */
 	if (use_privsep == -1)
@@ -378,6 +450,21 @@ fill_default_server_options(ServerOptions *options)
 	}
 #endif
 
+	if (options->hostbased_algorithms != NULL) {
+		if (!sshkey_names_valid2(options->hostbased_algorithms, 1))
+			fatal("Bad protocol 2 host key algorithms '%s'.",
+			    options->hostbased_algorithms);
+	} else
+		options->hostbased_algorithms = xstrdup("*");
+	options->hostbased_key_types = xstrdup(options->hostbased_algorithms); /* for compatibility */
+
+	if (options->pubkey_algorithms != NULL) {
+		if (!sshkey_names_valid2(options->pubkey_algorithms, 1))
+			fatal("Bad protocol 2 public key algorithms '%s'.",
+			    options->pubkey_algorithms);
+	} else
+		options->pubkey_algorithms = xstrdup("*");
+	options->pubkey_key_types = xstrdup(options->pubkey_algorithms); /* for compatibility */
 }
 
 /* Keyword tokens. */
@@ -385,9 +472,20 @@ typedef enum {
 	sBadOption,		/* == unknown option */
 	/* Portable-specific options */
 	sUsePAM,
+	/* X.509 Standard Options */
+	sHostbasedAlgorithms,
+	sPubkeyAlgorithms,
+	sX509KeyAlgorithm,
+	sAllowedClientCertPurpose,
+	sKeyAllowSelfIssued, sMandatoryCRL,
+	sCACertificateFile, sCACertificatePath,
+	sCARevocationFile, sCARevocationPath,
+	sCAldapVersion, sCAldapURL,
+	sVAType, sVACertificateFile,
+	sVAOCSPResponderURL,
 	/* Standard Options */
-	sPort, sHostKeyFile, sLoginGraceTime,
-	sPermitRootLogin, sLogFacility, sLogLevel,
+	sPort, sHostKeyFile, sServerKeyBits, sLoginGraceTime,
+	sKeyRegenerationTime, sPermitRootLogin, sLogFacility, sLogLevel,
 	sRhostsRSAAuthentication, sRSAAuthentication,
 	sKerberosAuthentication, sKerberosOrLocalPasswd, sKerberosTicketCleanup,
 	sKerberosGetAFSToken,
@@ -399,7 +497,7 @@ typedef enum {
 	sPermitTTY, sStrictModes, sEmptyPasswd, sTCPKeepAlive,
 	sPermitUserEnvironment, sAllowTcpForwarding, sCompression,
 	sRekeyLimit, sAllowUsers, sDenyUsers, sAllowGroups, sDenyGroups,
-	sIgnoreUserKnownHosts, sCiphers, sMacs, sPidFile,
+	sIgnoreUserKnownHosts, sCiphers, sMacs, sProtocol, sPidFile,
 	sGatewayPorts, sPubkeyAuthentication, sPubkeyAcceptedKeyTypes,
 	sXAuthLocation, sSubsystem, sMaxStartups, sMaxAuthTries, sMaxSessions,
 	sBanner, sUseDNS, sHostbasedAuthentication,
@@ -438,25 +536,41 @@ static struct {
 	{ "usepam", sUnsupported, SSHCFG_GLOBAL },
 #endif
 	{ "pamauthenticationviakbdint", sDeprecated, SSHCFG_GLOBAL },
+	/* X.509 Standard Options */
+	{ "hostbasedalgorithms", sHostbasedAlgorithms, SSHCFG_ALL },
+	{ "pubkeyalgorithms", sPubkeyAlgorithms, SSHCFG_ALL },
+	{ "x509keyalgorithm", sX509KeyAlgorithm, SSHCFG_GLOBAL },
+	{ "allowedcertpurpose", sAllowedClientCertPurpose, SSHCFG_GLOBAL },
+	{ "keyallowselfissued", sKeyAllowSelfIssued, SSHCFG_GLOBAL } ,
+	{ "mandatorycrl", sMandatoryCRL, SSHCFG_GLOBAL } ,
+	{ "cacertificatefile", sCACertificateFile, SSHCFG_GLOBAL },
+	{ "cacertificatepath", sCACertificatePath, SSHCFG_GLOBAL },
+	{ "carevocationfile", sCARevocationFile, SSHCFG_GLOBAL },
+	{ "carevocationpath", sCARevocationPath, SSHCFG_GLOBAL },
+	{ "caldapversion", sCAldapVersion, SSHCFG_GLOBAL },
+	{ "caldapurl", sCAldapURL, SSHCFG_GLOBAL },
+	{ "vatype", sVAType, SSHCFG_GLOBAL },
+	{ "vacertificatefile", sVACertificateFile, SSHCFG_GLOBAL },
+	{ "vaocspresponderurl", sVAOCSPResponderURL, SSHCFG_GLOBAL },
 	/* Standard Options */
 	{ "port", sPort, SSHCFG_GLOBAL },
 	{ "hostkey", sHostKeyFile, SSHCFG_GLOBAL },
 	{ "hostdsakey", sHostKeyFile, SSHCFG_GLOBAL },		/* alias */
 	{ "hostkeyagent", sHostKeyAgent, SSHCFG_GLOBAL },
 	{ "pidfile", sPidFile, SSHCFG_GLOBAL },
-	{ "serverkeybits", sDeprecated, SSHCFG_GLOBAL },
+	{ "serverkeybits", sServerKeyBits, SSHCFG_GLOBAL },
 	{ "logingracetime", sLoginGraceTime, SSHCFG_GLOBAL },
-	{ "keyregenerationinterval", sDeprecated, SSHCFG_GLOBAL },
+	{ "keyregenerationinterval", sKeyRegenerationTime, SSHCFG_GLOBAL },
 	{ "permitrootlogin", sPermitRootLogin, SSHCFG_ALL },
 	{ "syslogfacility", sLogFacility, SSHCFG_GLOBAL },
 	{ "loglevel", sLogLevel, SSHCFG_GLOBAL },
 	{ "rhostsauthentication", sDeprecated, SSHCFG_GLOBAL },
-	{ "rhostsrsaauthentication", sDeprecated, SSHCFG_ALL },
+	{ "rhostsrsaauthentication", sRhostsRSAAuthentication, SSHCFG_ALL },
 	{ "hostbasedauthentication", sHostbasedAuthentication, SSHCFG_ALL },
 	{ "hostbasedusesnamefrompacketonly", sHostbasedUsesNameFromPacketOnly, SSHCFG_ALL },
 	{ "hostbasedacceptedkeytypes", sHostbasedAcceptedKeyTypes, SSHCFG_ALL },
 	{ "hostkeyalgorithms", sHostKeyAlgorithms, SSHCFG_GLOBAL },
-	{ "rsaauthentication", sDeprecated, SSHCFG_ALL },
+	{ "rsaauthentication", sRSAAuthentication, SSHCFG_ALL },
 	{ "pubkeyauthentication", sPubkeyAuthentication, SSHCFG_ALL },
 	{ "pubkeyacceptedkeytypes", sPubkeyAcceptedKeyTypes, SSHCFG_ALL },
 	{ "dsaauthentication", sPubkeyAuthentication, SSHCFG_GLOBAL }, /* alias */
@@ -521,7 +635,7 @@ static struct {
 	{ "denygroups", sDenyGroups, SSHCFG_ALL },
 	{ "ciphers", sCiphers, SSHCFG_GLOBAL },
 	{ "macs", sMacs, SSHCFG_GLOBAL },
-	{ "protocol", sIgnore, SSHCFG_GLOBAL },
+	{ "protocol", sProtocol, SSHCFG_GLOBAL },
 	{ "gatewayports", sGatewayPorts, SSHCFG_ALL },
 	{ "subsystem", sSubsystem, SSHCFG_GLOBAL },
 	{ "maxstartups", sMaxStartups, SSHCFG_GLOBAL },
@@ -1001,6 +1115,137 @@ process_server_config_line(ServerOptions *options, char *line,
 		intptr = &options->use_pam;
 		goto parse_flag;
 
+	/* X.509 Standard Options */
+	case sHostbasedAcceptedKeyTypes:	/* for compatibility */
+	case sHostbasedAlgorithms:
+		arg = strdelim(&cp);
+		if (!arg || *arg == '\0')
+			fatal("%s line %d: Missing argument.", filename, linenum);
+		/* cannot validate here - depend from X509KeyAlgorithm */
+		if (*activep && options->hostbased_algorithms == NULL)
+			options->hostbased_algorithms = xstrdup(arg);
+		break;
+
+	case sPubkeyAcceptedKeyTypes:		/* for compatibility */
+	case sPubkeyAlgorithms:
+		arg = strdelim(&cp);
+		if (!arg || *arg == '\0')
+			fatal("%s line %d: Missing argument.", filename, linenum);
+		/* cannot validate here - depend from X509KeyAlgorithm */
+		if (*activep && options->pubkey_algorithms == NULL)
+			options->pubkey_algorithms = xstrdup(arg);
+		break;
+
+	case sX509KeyAlgorithm:
+		arg = strdelim(&cp);
+		if (!arg || *arg == '\0')
+			fatal("%s line %d: Missing argument.", filename, linenum);
+		if (ssh_add_x509key_alg(arg) < 0) {
+			fatal("%.200s line %d: Bad X.509 key algorithm '%.200s'.",
+			    filename, linenum, arg);
+		}
+		break;
+
+	case sAllowedClientCertPurpose:
+		intptr = &options->x509flags.allowedcertpurpose;
+		arg = strdelim(&cp);
+		if (arg && *arg) {
+			if (strcasecmp(arg, "skip") == 0) goto skip_purpose;
+
+			/* convert string to OpenSSL index */
+			value = ssh_get_x509purpose_s (1, arg);
+			if (value < 0)
+				fatal("%.200s line %d: Bad certificate purpose '%.30s'.",
+				    filename, linenum, arg);
+
+			if (*intptr == -1)
+				*intptr = value;
+		} else {
+skip_purpose:
+			if (*intptr == -1) {
+				*intptr = -2;
+				verbose("%.200s line %d: option is set to don`t check certificate purpose.",
+				    filename, linenum);
+			}
+		}
+		break;
+
+#ifndef SSH_X509STORE_DISABLED
+	case sKeyAllowSelfIssued:
+		intptr = &options->x509flags.key_allow_selfissued;
+		goto parse_flag;
+
+	case sMandatoryCRL:
+		intptr = &options->x509flags.mandatory_crl;
+		goto parse_flag;
+
+	case sCACertificateFile:
+		/* X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.certificate_file;
+parse_string:
+		arg = strdelim(&cp);
+		if (!arg || *arg == '\0')
+			fatal("%.200s line %d: Missing argument.", filename, linenum);
+		if (*charptr == NULL)
+			*charptr = xstrdup(arg);
+		break;
+
+	case sCACertificatePath:
+		/* X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.certificate_path;
+		goto parse_string;
+
+	case sCARevocationFile:
+		/* X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.revocation_file;
+		goto parse_string;
+
+	case sCARevocationPath:
+		/* X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.revocation_path;
+		goto parse_string;
+#endif /*ndef SSH_X509STORE_DISABLED*/
+
+#ifdef LDAP_ENABLED
+	case sCAldapVersion:
+		/* X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.ldap_ver;
+		goto parse_string;
+
+	case sCAldapURL:
+		/* X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.ldap_url;
+		goto parse_string;
+#endif /*def LDAP_ENABLED*/
+
+#ifdef SSH_OCSP_ENABLED
+	case sVAType:
+		intptr = &options->va.type;
+		arg = strdelim(&cp);
+		if (!arg || *arg == '\0')
+			fatal("%.200s line %d: Missing argument.", filename, linenum);
+
+		value = ssh_get_vatype_s(arg);
+		if (value < 0) {
+			fatal("%.200s line %d: Bad OCSP responder type '%.30s'.",
+			    filename, linenum, arg);
+		}
+
+		if (*intptr == -1)
+			*intptr = value;
+		break;
+
+	case sVACertificateFile:
+		/* VAOptions prefered type is 'const char*' */
+		charptr = (char**)&options->va.certificate_file;
+		goto parse_string;
+
+	case sVAOCSPResponderURL:
+		/* VAOptions prefered type is 'const char*' */
+		charptr = (char**)&options->va.responder_url;
+		goto parse_string;
+#endif /*def SSH_OCSP_ENABLED*/
+
 	/* Standard Options */
 	case sBadOption:
 		return -1;
@@ -1021,6 +1266,10 @@ process_server_config_line(ServerOptions *options, char *line,
 			    filename, linenum);
 		break;
 
+	case sServerKeyBits:
+		intptr = &options->server_key_bits;
+		goto parse_int;
+
 	case sLoginGraceTime:
 		intptr = &options->login_grace_time;
  parse_time:
@@ -1034,6 +1283,10 @@ process_server_config_line(ServerOptions *options, char *line,
 		if (*activep && *intptr == -1)
 			*intptr = value;
 		break;
+
+	case sKeyRegenerationTime:
+		intptr = &options->key_regeneration_time;
+		goto parse_time;
 
 	case sListenAddress:
 		arg = strdelim(&cp);
@@ -1153,6 +1406,10 @@ process_server_config_line(ServerOptions *options, char *line,
 		intptr = &options->ignore_user_known_hosts;
 		goto parse_flag;
 
+	case sRhostsRSAAuthentication:
+		intptr = &options->rhosts_rsa_authentication;
+		goto parse_flag;
+
 	case sHostbasedAuthentication:
 		intptr = &options->hostbased_authentication;
 		goto parse_flag;
@@ -1161,13 +1418,20 @@ process_server_config_line(ServerOptions *options, char *line,
 		intptr = &options->hostbased_uses_name_from_packet_only;
 		goto parse_flag;
 
+#if 0	/* already defined as sHostbasedAlgorithms */
 	case sHostbasedAcceptedKeyTypes:
 		charptr = &options->hostbased_key_types;
+		goto parse_keytypes;
+#endif
+
+	case sHostKeyAlgorithms:
+		charptr = &options->hostkeyalgorithms;
  parse_keytypes:
 		arg = strdelim(&cp);
 		if (!arg || *arg == '\0')
 			fatal("%s line %d: Missing argument.",
 			    filename, linenum);
+		/* cannot validate here - depend from X509KeyAlgorithm */
 		if (!sshkey_names_valid2(*arg == '+' ? arg + 1 : arg, 1))
 			fatal("%s line %d: Bad key types '%s'.",
 			    filename, linenum, arg ? arg : "<NONE>");
@@ -1175,17 +1439,19 @@ process_server_config_line(ServerOptions *options, char *line,
 			*charptr = xstrdup(arg);
 		break;
 
-	case sHostKeyAlgorithms:
-		charptr = &options->hostkeyalgorithms;
-		goto parse_keytypes;
+	case sRSAAuthentication:
+		intptr = &options->rsa_authentication;
+		goto parse_flag;
 
 	case sPubkeyAuthentication:
 		intptr = &options->pubkey_authentication;
 		goto parse_flag;
 
+#if 0	/* already defined as sPubkeyAlgorithms */
 	case sPubkeyAcceptedKeyTypes:
 		charptr = &options->pubkey_key_types;
 		goto parse_keytypes;
+#endif
 
 	case sKerberosAuthentication:
 		intptr = &options->kerberos_authentication;
@@ -1455,6 +1721,19 @@ process_server_config_line(ServerOptions *options, char *line,
 			    filename, linenum, arg ? arg : "<NONE>");
 		if (options->kex_algorithms == NULL)
 			options->kex_algorithms = xstrdup(arg);
+		break;
+
+	case sProtocol:
+		intptr = &options->protocol;
+		arg = strdelim(&cp);
+		if (!arg || *arg == '\0')
+			fatal("%s line %d: Missing argument.", filename, linenum);
+		value = proto_spec(arg);
+		if (value == SSH_PROTO_UNKNOWN)
+			fatal("%s line %d: Bad protocol spec '%s'.",
+			    filename, linenum, arg ? arg : "<NONE>");
+		if (*intptr == SSH_PROTO_UNKNOWN)
+			*intptr = value;
 		break;
 
 	case sSubsystem:
@@ -1838,11 +2117,28 @@ process_server_config_line(ServerOptions *options, char *line,
 
 	case sDeprecated:
 	case sIgnore:
+#ifdef SSH_X509STORE_DISABLED
+	case sKeyAllowSelfIssued:
+	case sMandatoryCRL:
+	case sCACertificateFile:
+	case sCACertificatePath:
+	case sCARevocationFile:
+	case sCARevocationPath:
+#endif /*def SSH_X509STORE_DISABLED*/
+#ifndef LDAP_ENABLED
+	case sCAldapVersion:
+	case sCAldapURL:
+#endif /*ndef LDAP_ENABLED*/
+#ifndef SSH_OCSP_ENABLED
+	case sVAType:
+	case sVACertificateFile:
+	case sVAOCSPResponderURL:
+#endif /*ndef SSH_OCSP_ENABLED*/
 	case sUnsupported:
 		do_log2(opcode == sIgnore ?
 		    SYSLOG_LEVEL_DEBUG2 : SYSLOG_LEVEL_INFO,
 		    "%s line %d: %s option %s", filename, linenum,
-		    opcode == sUnsupported ? "Unsupported" : "Deprecated", arg);
+		    opcode == sDeprecated || opcode == sIgnore ? "Deprecated" : "Unsupported", arg);
 		while (arg)
 		    arg = strdelim(&cp);
 		break;
@@ -1962,6 +2258,7 @@ copy_set_server_options(ServerOptions *dst, ServerOptions *src, int preauth)
 
 	M_CP_INTOPT(password_authentication);
 	M_CP_INTOPT(gss_authentication);
+	M_CP_INTOPT(rsa_authentication);
 	M_CP_INTOPT(pubkey_authentication);
 	M_CP_INTOPT(kerberos_authentication);
 	M_CP_INTOPT(hostbased_authentication);
@@ -2015,11 +2312,17 @@ copy_set_server_options(ServerOptions *dst, ServerOptions *src, int preauth)
 	} \
 } while(0)
 
+	M_CP_STROPT(hostbased_algorithms);
+	M_CP_STROPT(pubkey_algorithms);
+
 	/* See comment in servconf.h */
 	COPY_MATCH_STRING_OPTS();
 
-	/* Arguments that accept '+...' need to be expanded */
-	assemble_algorithms(dst);
+	/* for compatibility */
+	free(dst->hostbased_key_types);
+	dst->hostbased_key_types = xstrdup(dst->hostbased_algorithms);
+	free(dst->pubkey_key_types);
+	dst->pubkey_key_types = xstrdup(dst->pubkey_algorithms);
 
 	/*
 	 * The only things that should be below this point are string options
@@ -2104,6 +2407,24 @@ fmt_intarg(ServerOpCodes code, int val)
 		return fmt_multistate_int(val, multistate_tcpfwd);
 	case sFingerprintHash:
 		return ssh_digest_alg_name(val);
+	case sProtocol:
+		switch (val) {
+		case SSH_PROTO_1:
+			return "1";
+		case SSH_PROTO_2:
+			return "2";
+		case (SSH_PROTO_1|SSH_PROTO_2):
+			return "2,1";
+		default:
+			return "UNKNOWN";
+		}
+	case sAllowedClientCertPurpose:
+		return format_x509_purpose(val);
+#ifdef SSH_OCSP_ENABLED
+	case sVAType: {
+		return ssh_get_vatype_i(val);
+		} break;
+#endif
 	default:
 		switch (val) {
 		case 0:
@@ -2190,6 +2511,7 @@ dump_config(ServerOptions *o)
 	/* these are usually at the top of the config */
 	for (i = 0; i < o->num_ports; i++)
 		printf("port %d\n", o->ports[i]);
+	dump_cfg_fmtint(sProtocol, o->protocol);
 	dump_cfg_fmtint(sAddressFamily, o->address_family);
 
 	/*
@@ -2222,7 +2544,38 @@ dump_config(ServerOptions *o)
 #ifdef USE_PAM
 	dump_cfg_fmtint(sUsePAM, o->use_pam);
 #endif
+	/* X.509 Standard Options */
+	dump_cfg_string(sHostbasedAlgorithms, o->hostbased_algorithms);
+	dump_cfg_string(sPubkeyAlgorithms, o->pubkey_algorithms);
+	/* TODO to implement dump of sX509KeyAlgorithm */
+	/* sshd PKI(X509) flags */
+	dump_cfg_fmtint(sAllowedClientCertPurpose, o->x509flags.allowedcertpurpose);
+#ifndef SSH_X509STORE_DISABLED
+	dump_cfg_fmtint(sKeyAllowSelfIssued, o->x509flags.key_allow_selfissued);
+	dump_cfg_fmtint(sMandatoryCRL	   , o->x509flags.mandatory_crl	      );
+#endif /*ndef SSH_X509STORE_DISABLED*/
+#ifndef SSH_X509STORE_DISABLED
+	/* sshd PKI(X509) system store */
+	dump_cfg_string(sCACertificateFile, o->ca.certificate_file);
+	dump_cfg_string(sCACertificatePath, o->ca.certificate_path);
+	dump_cfg_string(sCARevocationFile , o->ca.revocation_file );
+	dump_cfg_string(sCARevocationPath , o->ca.revocation_path );
+#ifdef LDAP_ENABLED
+	dump_cfg_string(sCAldapVersion    , o->ca.ldap_ver	  );
+	dump_cfg_string(sCAldapURL	  , o->ca.ldap_url	  );
+#endif
+#endif /*ndef SSH_X509STORE_DISABLED*/
+#ifdef SSH_OCSP_ENABLED
+	/* ssh X.509 extra validation */
+	dump_cfg_fmtint(sVAType		   , o->va.type		   );
+	dump_cfg_string(sVACertificateFile , o->va.certificate_file);
+	dump_cfg_string(sVAOCSPResponderURL, o->va.responder_url   );
+#endif /*def SSH_OCSP_ENABLED*/
+
+	/* Standard Options */
+	dump_cfg_int(sServerKeyBits, o->server_key_bits);
 	dump_cfg_int(sLoginGraceTime, o->login_grace_time);
+	dump_cfg_int(sKeyRegenerationTime, o->key_regeneration_time);
 	dump_cfg_int(sX11DisplayOffset, o->x11_display_offset);
 	dump_cfg_int(sMaxAuthTries, o->max_authtries);
 	dump_cfg_int(sMaxSessions, o->max_sessions);
@@ -2234,9 +2587,11 @@ dump_config(ServerOptions *o)
 	dump_cfg_fmtint(sPermitRootLogin, o->permit_root_login);
 	dump_cfg_fmtint(sIgnoreRhosts, o->ignore_rhosts);
 	dump_cfg_fmtint(sIgnoreUserKnownHosts, o->ignore_user_known_hosts);
+	dump_cfg_fmtint(sRhostsRSAAuthentication, o->rhosts_rsa_authentication);
 	dump_cfg_fmtint(sHostbasedAuthentication, o->hostbased_authentication);
 	dump_cfg_fmtint(sHostbasedUsesNameFromPacketOnly,
 	    o->hostbased_uses_name_from_packet_only);
+	dump_cfg_fmtint(sRSAAuthentication, o->rsa_authentication);
 	dump_cfg_fmtint(sPubkeyAuthentication, o->pubkey_authentication);
 #ifdef KRB5
 	dump_cfg_fmtint(sKerberosAuthentication, o->kerberos_authentication);
@@ -2299,12 +2654,8 @@ dump_config(ServerOptions *o)
 	dump_cfg_string(sHostKeyAgent, o->host_key_agent);
 	dump_cfg_string(sKexAlgorithms,
 	    o->kex_algorithms ? o->kex_algorithms : KEX_SERVER_KEX);
-	dump_cfg_string(sHostbasedAcceptedKeyTypes, o->hostbased_key_types ?
-	    o->hostbased_key_types : KEX_DEFAULT_PK_ALG);
 	dump_cfg_string(sHostKeyAlgorithms, o->hostkeyalgorithms ?
-	    o->hostkeyalgorithms : KEX_DEFAULT_PK_ALG);
-	dump_cfg_string(sPubkeyAcceptedKeyTypes, o->pubkey_key_types ?
-	    o->pubkey_key_types : KEX_DEFAULT_PK_ALG);
+	    o->hostkeyalgorithms : "*");
 
 	/* string arguments requiring a lookup */
 	dump_cfg_string(sLogLevel, log_level_name(o->log_level));

@@ -1,6 +1,8 @@
 /* $OpenBSD: ssh-pkcs11-helper.c,v 1.12 2016/02/15 09:47:49 dtucker Exp $ */
 /*
  * Copyright (c) 2010 Markus Friedl.  All rights reserved.
+ * Copyright (c) 2011 Kenneth Robinette.  All rights reserved.
+ * Copyright (c) 2016 Roumen Petrov.  All rights reserved.
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -93,8 +95,8 @@ lookup_key(Key *k)
 	struct pkcs11_keyinfo *ki;
 
 	TAILQ_FOREACH(ki, &pkcs11_keylist, next) {
-		debug("check %p %s", ki, ki->providername);
-		if (key_equal(k, ki->key))
+		debug("check %p %s", (void*)ki, ki->providername);
+		if (key_equal_public(k, ki->key))
 			return (ki->key);
 	}
 	return (NULL);
@@ -164,6 +166,50 @@ process_del(void)
 	buffer_free(&msg);
 }
 
+static int
+process_key_sign(
+	u_int dlen, u_char *data,
+	Key *key,
+	u_char **signature, u_int *slen
+) {
+	int ret;
+
+	switch(X509KEY_BASETYPE(key)) {
+	case KEY_RSA: {
+		ret = RSA_size(key->rsa);
+		*signature = xmalloc(ret);
+
+		ret = RSA_private_encrypt(dlen, data, *signature, key->rsa, RSA_PKCS1_PADDING);
+		if (ret != -1) {
+			*slen = ret;
+			ret = 0;
+		}
+		} break;
+#ifdef OPENSSL_HAS_ECC
+	case KEY_ECDSA: {
+		ECDSA_SIG *sig = NULL;
+
+		sig = ECDSA_do_sign(data, dlen, key->ecdsa);
+		if (sig == NULL) return (-1);
+
+		/* encode ECDSA signature */
+		ret = i2d_ECDSA_SIG(sig, signature);
+		if (ret > 0) {
+			*slen = ret;
+			ret = 0;
+		} else
+			ret = -1;
+		ECDSA_SIG_free(sig);
+		} break;
+#endif /*def OPENSSL_HAS_ECC*/
+	default:
+		ret = -1;
+		break;
+	}
+
+	return (ret);
+}
+
 static void
 process_sign(void)
 {
@@ -180,15 +226,7 @@ process_sign(void)
 	if ((key = key_from_blob(blob, blen)) != NULL) {
 		if ((found = lookup_key(key)) != NULL) {
 #ifdef WITH_OPENSSL
-			int ret;
-
-			slen = RSA_size(key->rsa);
-			signature = xmalloc(slen);
-			if ((ret = RSA_private_encrypt(dlen, data, signature,
-			    found->rsa, RSA_PKCS1_PADDING)) != -1) {
-				slen = ret;
-				ok = 0;
-			}
+			ok = process_key_sign(dlen, data, found, &signature, &slen);
 #endif /* WITH_OPENSSL */
 		}
 		key_free(key);
@@ -280,6 +318,7 @@ main(int argc, char **argv)
 
 	extern char *__progname;
 
+	(void)argc;
 	ssh_malloc_init();	/* must be called before any mallocs */
 	TAILQ_INIT(&pkcs11_keylist);
 	pkcs11_init(0);
@@ -368,6 +407,7 @@ main(int argc, char **argv)
 {
 	extern char *__progname;
 
+	(void)argc;
 	__progname = ssh_get_progname(argv[0]);
 	log_init(__progname, SYSLOG_LEVEL_ERROR, SYSLOG_FACILITY_AUTH, 0);
 	fatal("PKCS#11 support disabled at compile time");

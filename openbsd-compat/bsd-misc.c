@@ -35,6 +35,8 @@
 char *__progname;
 #endif
 
+char *ssh_progpath = NULL;
+
 /*
  * NB. duplicate __progname in case it is an alias for argv[0]
  * Otherwise it may get clobbered by setproctitle()
@@ -59,6 +61,16 @@ char *ssh_get_progname(char *argv0)
 		perror("strdup");
 		exit(1);
 	}
+
+{
+	ssh_progpath = strdup(argv0);
+	p = strrchr(ssh_progpath, '/');
+	if (p != NULL) *p = '\0';
+	p = ssh_progpath;
+	ssh_progpath = realpath(p, NULL);
+	free(p);
+}
+
 	return q;
 }
 

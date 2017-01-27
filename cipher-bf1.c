@@ -31,6 +31,7 @@
 #include <openssl/evp.h>
 
 #include "openbsd-compat/openssl-compat.h"
+#include "evp-compat.h"
 
 /*
  * SSH1 uses a variation on Blowfish, all bytes must be swapped before
@@ -89,17 +90,19 @@ bf_ssh1_cipher(EVP_CIPHER_CTX *ctx, u_char *out, const u_char *in,
 const EVP_CIPHER *
 evp_ssh1_bf(void)
 {
-	static EVP_CIPHER ssh1_bf;
+	static EVP_CIPHER *ssh1_bf = NULL;
 
-	memcpy(&ssh1_bf, EVP_bf_cbc(), sizeof(EVP_CIPHER));
-	orig_bf = ssh1_bf.do_cipher;
-	ssh1_bf.nid = NID_undef;
+	if (ssh1_bf != NULL) return ssh1_bf;
+
+	ssh1_bf = EVP_CIPHER_meth_dup(EVP_bf_cbc());
+
+	orig_bf = EVP_CIPHER_meth_get_do_cipher(ssh1_bf);
 #ifdef SSH_OLD_EVP
-	ssh1_bf.init = bf_ssh1_init;
+	(void) EVP_CIPHER_meth_set_init(ssh1_bf, bf_ssh1_init);
 #endif
-	ssh1_bf.do_cipher = bf_ssh1_cipher;
-	ssh1_bf.key_len = 32;
-	return (&ssh1_bf);
+	(void) EVP_CIPHER_meth_set_do_cipher(ssh1_bf, bf_ssh1_cipher);
+
+	return ssh1_bf;
 }
 #endif /* defined(WITH_OPENSSL) && !defined(OPENSSL_NO_BF) */
 

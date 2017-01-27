@@ -6,6 +6,7 @@
  * Copyright (c) 1996, David Mazieres <dm@uun.org>
  * Copyright (c) 2008, Damien Miller <djm@openbsd.org>
  * Copyright (c) 2013, Markus Friedl <markus@openbsd.org>
+ * Copyright (c) 2014, Roumen Petrov
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -32,8 +33,70 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifdef OPENSSL_FIPS
+#include <log.h>
+#include <openssl/err.h>
+#endif
+
 
 #ifndef HAVE_ARC4RANDOM
+
+#ifdef OPENSSL_FIPS
+  /* synchronize HAVE_ARC4RANDOM_<...> with defined.h */
+# define HAVE_ARC4RANDOM_BUF
+
+/* Size of key to use */
+#define SEED_SIZE 20
+static int rc4_ready = 0;
+
+void      fips_arc4random_stir(void);
+u_int32_t fips_arc4random(void);
+void      save_arc4random_stir(void);
+u_int32_t save_arc4random(void);
+
+/* FIXME: based on readhat/fedora fips patch */
+void
+fips_arc4random_stir(void) {
+	unsigned char rand_buf[SEED_SIZE];
+
+	if (RAND_bytes(rand_buf, sizeof(rand_buf)) <= 0)
+		fatal("Couldn't obtain random bytes (error %ld)",
+		    ERR_get_error());
+	rc4_ready = 1;
+}
+u_int32_t
+fips_arc4random(void) {
+	unsigned int r = 0;
+	void *rp = &r;
+
+	if (!rc4_ready) {
+		fips_arc4random_stir();
+	}
+	RAND_bytes(rp, sizeof(r));
+
+	return(r);
+}
+
+void
+arc4random_stir(void) {
+	if (FIPS_mode())
+		fips_arc4random_stir();
+	else
+		save_arc4random_stir();
+}
+
+u_int32_t
+arc4random(void) {
+	if (FIPS_mode())
+		fips_arc4random();
+	else
+		save_arc4random();
+}
+
+# define arc4random_stir	save_arc4random_stir
+# define arc4random		save_arc4random
+#endif
+
 
 #ifdef WITH_OPENSSL
 #include <openssl/rand.h>
@@ -44,12 +107,6 @@
 
 #define KEYSTREAM_ONLY
 #include "chacha_private.h"
-
-#ifdef __GNUC__
-#define inline __inline
-#else				/* !__GNUC__ */
-#define inline
-#endif				/* !__GNUC__ */
 
 /* OpenSSH isn't multithreaded */
 #define _ARC4_LOCK()
@@ -246,6 +303,11 @@ arc4random_buf(void *buf, size_t n)
 	_ARC4_UNLOCK();
 }
 # endif /* !HAVE_ARC4RANDOM_BUF */
+#ifdef OPENSSL_FIPS
+ /* to use arc4random_buf based on arc4random */
+# define HAVE_ARC4RANDOM
+# undef HAVE_ARC4RANDOM_BUF
+#endif
 #endif /* !HAVE_ARC4RANDOM */
 
 /* arc4random_buf() that uses platform arc4random() */

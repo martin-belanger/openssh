@@ -59,10 +59,12 @@ touch $OBJ/host_revoked_plain
 touch $OBJ/host_revoked_cert
 cat $OBJ/host_ca_key.pub $OBJ/host_ca_key2.pub > $OBJ/host_revoked_ca
 
-PLAIN_TYPES=`$SSH -Q key-plain | sed 's/^ssh-dss/ssh-dsa/g;s/^ssh-//'`
+PLAIN_TYPES=`$SSH -Q key-plain | grep -v "^x509v3-" | sed 's/^ssh-dss/ssh-dsa/g;s/^ssh-//'`
 
 if echo "$PLAIN_TYPES" | grep '^rsa$' >/dev/null 2>&1 ; then
+    if config_defined HAVE_EVP_SHA256 ; then
 	PLAIN_TYPES="$PLAIN_TYPES rsa-sha2-256 rsa-sha2-512"
+    fi
 fi
 
 # Prepare certificate, plain key and CA KRLs

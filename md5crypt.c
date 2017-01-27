@@ -9,6 +9,7 @@
  */
 
 #include "includes.h"
+#include "md5crypt.h"
 
 #if defined(HAVE_MD5_PASSWORDS) && !defined(HAVE_MD5_CRYPT)
 #include <sys/types.h>
@@ -67,7 +68,7 @@ md5_crypt(const char *pw, const char *salt)
 	/* It stops at the first '$', max 8 chars */
 	for (ep = sp; *ep != '$'; ep++) {
 		if (*ep == '\0' || ep >= (sp + 8))
-			return (NULL);
+			break;
 	}
 
 	/* get the length of the true salt */

@@ -356,6 +356,7 @@ sshkey_fuzz_tests(void)
 	sshkey_free(k1);
 	TEST_DONE();
 
+#ifdef HAVE_EVP_SHA256
 	TEST_START("fuzz RSA SHA256 sig");
 	buf = load_file("rsa_1");
 	ASSERT_INT_EQ(sshkey_parse_private_fileblob(buf, "", &k1, NULL), 0);
@@ -363,7 +364,9 @@ sshkey_fuzz_tests(void)
 	sig_fuzz(k1, "rsa-sha2-256");
 	sshkey_free(k1);
 	TEST_DONE();
+#endif /*def HAVE_EVP_SHA256*/
 
+#ifdef HAVE_EVP_SHA256
 	TEST_START("fuzz RSA SHA512 sig");
 	buf = load_file("rsa_1");
 	ASSERT_INT_EQ(sshkey_parse_private_fileblob(buf, "", &k1, NULL), 0);
@@ -371,6 +374,7 @@ sshkey_fuzz_tests(void)
 	sig_fuzz(k1, "rsa-sha2-512");
 	sshkey_free(k1);
 	TEST_DONE();
+#endif /*def HAVE_EVP_SHA256*/
 
 	TEST_START("fuzz DSA sig");
 	buf = load_file("dsa_1");

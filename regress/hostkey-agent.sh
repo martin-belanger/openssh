@@ -14,7 +14,7 @@ grep -vi 'hostkey' $OBJ/sshd_proxy > $OBJ/sshd_proxy.orig
 echo "HostKeyAgent $SSH_AUTH_SOCK" >> $OBJ/sshd_proxy.orig
 
 trace "load hostkeys"
-for k in `${SSH} -Q key-plain` ; do
+for k in `${SSH} -Q key-plain | grep -v "^x509v3-"` ; do
 	${SSHKEYGEN} -qt $k -f $OBJ/agent-key.$k -N '' || fatal "ssh-keygen $k"
 	(
 		printf 'localhost-with-alias,127.0.0.1,::1 '
@@ -31,7 +31,7 @@ cp $OBJ/known_hosts.orig $OBJ/known_hosts
 unset SSH_AUTH_SOCK
 
 for ps in no yes; do
-	for k in `${SSH} -Q key-plain` ; do
+	for k in `${SSH} -Q key-plain | grep -v "^x509v3-"` ; do
 		verbose "key type $k privsep=$ps"
 		cp $OBJ/sshd_proxy.orig $OBJ/sshd_proxy
 		echo "UsePrivilegeSeparation $ps" >> $OBJ/sshd_proxy

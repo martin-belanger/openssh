@@ -1,3 +1,11 @@
+.\" Implement .Dd with the Mdocdate RCS keyword
+.rn Dd xD
+.de Dd
+.ie \\$1$Mdocdate: \{\
+.	xD \\$2 \\$3, \\$4
+.\}
+.el .xD \\$1 \\$2 \\$3 \\$4 \\$5 \\$6 \\$7 \\$8
+..
 .\"
 .\" Author: Tatu Ylonen <ylo@cs.hut.fi>
 .\" Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -12,6 +20,7 @@
 .\" Copyright (c) 1999,2000 Markus Friedl.  All rights reserved.
 .\" Copyright (c) 1999 Aaron Campbell.  All rights reserved.
 .\" Copyright (c) 1999 Theo de Raadt.  All rights reserved.
+.\" Copyright (c) 2002-2016 Roumen Petrov.  All rights reserved.
 .\"
 .\" Redistribution and use in source and binary forms, with or without
 .\" modification, are permitted provided that the following conditions
@@ -34,7 +43,7 @@
 .\" THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 .\"
 .\" $OpenBSD: ssh.1,v 1.376 2016/07/16 06:57:55 jmc Exp $
-.Dd $Mdocdate: July 16 2016 $
+.Dd $Mdocdate: September 18 2016 $
 .Dt SSH 1
 .Os
 .Sh NAME
@@ -43,13 +52,14 @@
 .Sh SYNOPSIS
 .Nm ssh
 .Bk -words
-.Op Fl 1246AaCfGgKkMNnqsTtVvXxYy
+.Op Fl 1246AaCdfgKkMNnqsTtVvXxYy
 .Op Fl b Ar bind_address
 .Op Fl c Ar cipher_spec
 .Op Fl D Oo Ar bind_address : Oc Ns Ar port
 .Op Fl E Ar log_file
 .Op Fl e Ar escape_char
 .Op Fl F Ar configfile
+.Op Fl G Ar engine_configfile
 .Op Fl I Ar pkcs11
 .Op Fl i Ar identity_file
 .Op Fl J Oo Ar user Ns @ Oc Ns Ar host Ns Op : Ns Ar port
@@ -127,6 +137,11 @@ socket) can access the local agent through the forwarded connection.
 An attacker cannot obtain key material from the agent,
 however they can perform operations on the keys that enable them to
 authenticate using the identities loaded into the agent.
+Using the
+.Fl c
+flag of
+.Xr ssh-add 1
+can reduce (but not eliminate) the risk.
 .Pp
 .It Fl a
 Disables forwarding of the authentication agent connection.
@@ -216,6 +231,14 @@ empty address or
 .Sq *
 indicates that the port should be available from all interfaces.
 .Pp
+.It Fl d
+Causes
+.Nm
+to print its configuration after evaluating
+.Cm Host
+and
+.Cm Match
+blocks and exit.
 .It Fl E Ar log_file
 Append debug logs to
 .Ar log_file
@@ -266,15 +289,12 @@ then a client started with
 will wait for all remote port forwards to be successfully established
 before placing itself in the background.
 .Pp
-.It Fl G
-Causes
-.Nm
-to print its configuration after evaluating
-.Cm Host
-and
-.Cm Match
-blocks and exit.
-.Pp
+.It Fl G Ar engine_configfile
+Specifies an alternative per-user file for post initialization of
+.Xr openssl 1
+engines.
+The default per-user configuration file is
+.Pa ~/.ssh/engine .
 .It Fl g
 Allows remote hosts to connect to local forwarded ports.
 If used on a multiplexed connection, then this option must be specified
@@ -284,7 +304,7 @@ on the master process.
 Specify the PKCS#11 shared library
 .Nm
 should use to communicate with a PKCS#11 token providing the user's
-private RSA key.
+private EC or RSA key and X.509 certificate.
 .Pp
 .It Fl i Ar identity_file
 Selects a file from which the identity (private key) for
@@ -298,6 +318,8 @@ for protocol version 1, and
 and
 .Pa ~/.ssh/id_rsa
 for protocol version 2.
+In addition for protocol version 2, identity may contain
+X.509 certificate that match private key.
 Identity files may also be specified on
 a per-host basis in the configuration file.
 It is possible to have multiple
@@ -475,99 +497,8 @@ Valid commands are:
 Can be used to give options in the format used in the configuration file.
 This is useful for specifying options for which there is no separate
 command-line flag.
-For full details of the options listed below, and their possible values, see
+For full details of the options and their possible values, see
 .Xr ssh_config 5 .
-.Pp
-.Bl -tag -width Ds -offset indent -compact
-.It AddKeysToAgent
-.It AddressFamily
-.It BatchMode
-.It BindAddress
-.It CanonicalDomains
-.It CanonicalizeFallbackLocal
-.It CanonicalizeHostname
-.It CanonicalizeMaxDots
-.It CanonicalizePermittedCNAMEs
-.It CertificateFile
-.It ChallengeResponseAuthentication
-.It CheckHostIP
-.It Cipher
-.It Ciphers
-.It ClearAllForwardings
-.It Compression
-.It CompressionLevel
-.It ConnectionAttempts
-.It ConnectTimeout
-.It ControlMaster
-.It ControlPath
-.It ControlPersist
-.It DynamicForward
-.It EscapeChar
-.It ExitOnForwardFailure
-.It FingerprintHash
-.It ForwardAgent
-.It ForwardX11
-.It ForwardX11Timeout
-.It ForwardX11Trusted
-.It GatewayPorts
-.It GlobalKnownHostsFile
-.It GSSAPIAuthentication
-.It GSSAPIDelegateCredentials
-.It HashKnownHosts
-.It Host
-.It HostbasedAuthentication
-.It HostbasedKeyTypes
-.It HostKeyAlgorithms
-.It HostKeyAlias
-.It HostName
-.It IdentitiesOnly
-.It IdentityAgent
-.It IdentityFile
-.It Include
-.It IPQoS
-.It KbdInteractiveAuthentication
-.It KbdInteractiveDevices
-.It KexAlgorithms
-.It LocalCommand
-.It LocalForward
-.It LogLevel
-.It MACs
-.It Match
-.It NoHostAuthenticationForLocalhost
-.It NumberOfPasswordPrompts
-.It PasswordAuthentication
-.It PermitLocalCommand
-.It PKCS11Provider
-.It Port
-.It PreferredAuthentications
-.It Protocol
-.It ProxyCommand
-.It ProxyJump
-.It ProxyUseFdpass
-.It PubkeyAcceptedKeyTypes
-.It PubkeyAuthentication
-.It RekeyLimit
-.It RemoteForward
-.It RequestTTY
-.It RhostsRSAAuthentication
-.It RSAAuthentication
-.It SendEnv
-.It ServerAliveInterval
-.It ServerAliveCountMax
-.It StreamLocalBindMask
-.It StreamLocalBindUnlink
-.It StrictHostKeyChecking
-.It TCPKeepAlive
-.It Tunnel
-.It TunnelDevice
-.It UpdateHostKeys
-.It UsePrivilegedPort
-.It User
-.It UserKnownHostsFile
-.It VerifyHostKeyDNS
-.It VisualHostKey
-.It XAuthLocation
-.El
 .Pp
 .It Fl p Ar port
 Port to connect to on the remote host.
@@ -595,6 +526,8 @@ The available features are:
 (non-certificate key types), and
 .Ar protocol-version
 (supported SSH protocol versions).
+This option must be specified last as other options may impact list
+of supported algorithms.
 .Pp
 .It Fl q
 Quiet mode.
@@ -850,7 +783,7 @@ considered for login.
 Additionally, the server
 .Em must
 be able to verify the client's
-host key (see the description of
+host key or X.509 certificate (see the description of
 .Pa /etc/ssh/ssh_known_hosts
 and
 .Pa ~/.ssh/known_hosts ,
@@ -865,29 +798,29 @@ and the rlogin/rsh protocol in general, are inherently insecure and should be
 disabled if security is desired.]
 .Pp
 Public key authentication works as follows:
-The scheme is based on public-key cryptography,
+The scheme is based on public-key cryptography or infrastructure (PKI),
 using cryptosystems
 where encryption and decryption are done using separate keys,
 and it is unfeasible to derive the decryption key from the encryption key.
 The idea is that each user creates a public/private
 key pair for authentication purposes.
-The server knows the public key, and only the user knows the private key.
+The server knows the public key or X.509 certificate, and only the user knows the private key.
 .Nm
 implements public key authentication protocol automatically,
-using one of the DSA, ECDSA, Ed25519 or RSA algorithms.
+using one of the DSA, ECDSA, Ed25519 or RSA algorithms or X.509 certificates.
 The HISTORY section of
 .Xr ssl 8
 contains a brief discussion of the DSA and RSA algorithms.
 .Pp
 The file
 .Pa ~/.ssh/authorized_keys
-lists the public keys that are permitted for logging in.
+lists the public keys or X.509 certificates that are permitted for logging in.
 When the user logs in, the
 .Nm
-program tells the server which key pair it would like to use for
+program tells the server which key pair or X.509 certificate it would like to use for
 authentication.
 The client proves that it has access to the private key
-and the server checks that the corresponding public key
+and the server checks that the corresponding public key or X.509 certificate
 is authorized to accept the account.
 .Pp
 The user creates his/her key pair by running
@@ -917,15 +850,26 @@ or
 .Pa ~/.ssh/id_rsa.pub
 (RSA)
 in the user's home directory.
-The user should then copy the public key
+For protocol version 2 identity files may contain
+private key and X.509 certificate that match it.
+In this case *.pub file must contain that certificate.
+The user should then copy the public key or X.509 certificate
 to
 .Pa ~/.ssh/authorized_keys
 in his/her home directory on the remote machine.
+In case with X.509 certificates user can use
+.Dq new style
+: instead to add content of file to authorized_keys user
+can write certificate
+.Dq Distinguished Name
+- see
+.Xr sshd 8
+manual page.
 The
 .Pa authorized_keys
 file corresponds to the conventional
 .Pa ~/.rhosts
-file, and has one key
+file, and has one key or X.509 certificate
 per line, though the lines can be very long.
 After this, the user can log in without giving the password.
 .Pp
@@ -977,6 +921,12 @@ in the user's home directory.
 Additionally, the file
 .Pa /etc/ssh/ssh_known_hosts
 is automatically checked for known hosts.
+If host key is a X.509 certificate line may contain certificate
+.Dq Distinguished Name
+instead base64 encoded representation.
+This is support only if
+.Dq "X.509 store"
+is enabled.
 Any new hosts are automatically added to the user's file.
 If a host's identification ever changes,
 .Nm
@@ -1249,16 +1199,17 @@ all known hosts, the following command line can be used:
 .Pp
 If the fingerprint is unknown,
 an alternative method of verification is available:
-SSH fingerprints verified by DNS.
+SSH fingerprints or X.509 certificates verified by DNS.
 An additional resource record (RR),
-SSHFP,
+SSHFP or CERT,
 is added to a zonefile
 and the connecting client is able to match the fingerprint
+or X.509 certificate
 with that of the key presented.
 .Pp
 In this example, we are connecting a client to a server,
 .Dq host.example.com .
-The SSHFP resource records should first be added to the zonefile for
+The SSHFP or CERT resource records should first be added to the zonefile for
 host.example.com:
 .Bd -literal -offset indent
 $ ssh-keygen -r host.example.com.
@@ -1269,6 +1220,10 @@ To check that the zone is answering fingerprint queries:
 .Pp
 .Dl $ dig -t SSHFP host.example.com
 .Pp
+To check that the zone is answering X.509 certificate queries:
+.Pp
+.Dl $ dig -t CERT host.example.com
+.Pp
 Finally the client connects:
 .Bd -literal -offset indent
 $ ssh -o "VerifyHostKeyDNS ask" host.example.com
@@ -1276,6 +1231,13 @@ $ ssh -o "VerifyHostKeyDNS ask" host.example.com
 Matching host key fingerprint found in DNS.
 Are you sure you want to continue connecting (yes/no)?
 .Ed
+.Pp
+When host key is a X.509 certificate
+.Dq Distinguished Name
+is displayed after fingerprint.
+Note that host X.509 certificate always is verifified and validated if
+.Dq "X.509 store"
+is enabled.
 .Pp
 See the
 .Cm VerifyHostKeyDNS
@@ -1471,12 +1433,25 @@ and not accessible by others.
 .Pp
 .It Pa ~/.ssh/authorized_keys
 Lists the public keys (DSA, ECDSA, Ed25519, RSA)
+or X.509 certificates
 that can be used for logging in as this user.
 The format of this file is described in the
 .Xr sshd 8
 manual page.
 This file is not highly sensitive, but the recommended
 permissions are read/write for the user, and not accessible by others.
+.Pp
+.It Pa ~/.ssh/ca/ca-bundle.crt
+.It Pa ~/.ssh/ca/ca-bundle.crl
+Part of user
+.Dq "X.509 store" .
+Same as systemwide files below.
+.Pp
+.It Pa ~/.ssh/ca/crt
+.It Pa ~/.ssh/ca/crl
+Part of user
+.Dq "X.509 store" .
+Same as systemwide directories below.
 .Pp
 .It Pa ~/.ssh/config
 This is the per-user configuration file.
@@ -1499,6 +1474,14 @@ Contains the private key for authentication.
 These files
 contain sensitive data and should be readable by the user but not
 accessible by others (read/write/execute).
+.Pp
+Identity for protocol version 2 may contain
+X.509 certificate that match private key.
+For x509v3-ecdsa-sha2-* public key algorithms, file
+with ECDSA key may contain extra X.509 certificates.
+Extra certificates along with certificates from X.509 store
+are used to build chain of certificates leading to
+a trusted certificate authority.
 .Nm
 will simply ignore a private key file if it is accessible by others.
 It is possible to specify a passphrase when
@@ -1511,11 +1494,13 @@ sensitive part of this file using 3DES.
 .It Pa ~/.ssh/id_ed25519.pub
 .It Pa ~/.ssh/id_rsa.pub
 Contains the public key for authentication.
+Note for protocol version 2 if an identity contain private key
+and X.509 certificate, file must contain that certificate.
 These files are not
 sensitive and can (but need not) be readable by anyone.
 .Pp
 .It Pa ~/.ssh/known_hosts
-Contains a list of host keys for all hosts the user has logged into
+Contains a list of host keys or X.509 certificates for all hosts the user has logged into
 that are not already in the systemwide list of known host keys.
 See
 .Xr sshd 8
@@ -1540,6 +1525,28 @@ This file is used in exactly the same way as
 but allows host-based authentication without permitting login with
 rlogin/rsh.
 .Pp
+.It /etc/ssh/ca/ca-bundle.crt
+.It /etc/ssh/ca/ca-bundle.crl
+Part of systemwide
+.Dq "X.509 store" .
+The first file contain multiple certificates and the second
+.Dq "Certificate Revocation List"
+(CRLs) of X.509 certificate signers in PEM format concatenated together.
+Used in verification and validation of server host certificate.
+.Pp
+.It /etc/ssh/ca/crt
+.It /etc/ssh/ca/crl
+Part of systemwide
+.Dq "X.509 store" .
+.Dq "Hash dirs"
+with certificates, the first directory or CLRs, the second of
+certificate signers.
+Each certificate should be stored in separate file with name
+[HASH].[NUMBER] or [HASH].r[NUMBER] for the CRL, where [HASH] is
+certificate or CRL hash value and [NUMBER] is an integer starting
+from zero.
+Used in verification and validation of server host certificate.
+.Pp
 .It Pa /etc/ssh/ssh_config
 Systemwide configuration file.
 The file format and configuration options are described in
@@ -1552,12 +1559,19 @@ The file format and configuration options are described in
 .It Pa /etc/ssh/ssh_host_rsa_key
 These files contain the private parts of the host keys
 and are used for host-based authentication.
+For protocol version 2 keys files may contain private part
+and X.509 certificate that match it.
+If a X.509 certificate is used as host key for hostbased authentication
+that certificate must have client purpose too or server configuration
+must permit connection without client purpose. For allowed client
+certificate purposes see
+.Xr ssh_config 5 .
 .Pp
 .It Pa /etc/ssh/ssh_known_hosts
-Systemwide list of known host keys.
+Systemwide list of known host keys or X.509 certificates.
 This file should be prepared by the
-system administrator to contain the public host keys of all machines in the
-organization.
+system administrator to contain the public host keys or X.509 certificates
+of all machines in the organization.
 It should be world-readable.
 See
 .Xr sshd 8
@@ -1699,6 +1713,23 @@ if an error occurred.
 .%O International Workshop on Cryptographic Techniques and E-Commerce (CrypTEC '99)
 .%T Hash Visualization: a New Technique to improve Real-World Security
 .Re
+.Rs
+.%A K. Igoe
+.%A D. Stebila
+.%D March 2011
+.%R RFC 6187
+.%T X.509v3 Certificates for Secure Shell Authentication
+.Re
+.Rs
+.%A T. Ylonen
+.%A T. Kivinen
+.%A M. Saarinen
+.%A T. Rinne
+.%A S. Lehtinen
+.%D January 31, 2002
+.%O draft-ietf-secsh-transport-12.txt
+.%T SSH Transport Layer Protocol
+.Re
 .Sh AUTHORS
 OpenSSH is a derivative of the original and free
 ssh 1.2.12 release by Tatu Ylonen.
@@ -1708,3 +1739,4 @@ removed many bugs, re-added newer features and
 created OpenSSH.
 Markus Friedl contributed the support for SSH
 protocol versions 1.5 and 2.0.
+Roumen Petrov contributed support for X.509 certificates.

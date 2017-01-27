@@ -32,6 +32,7 @@
 #include <signal.h>
 
 #include "sshkey.h"
+#include "ssh-x509.h"
 #include "cipher.h"
 #include "digest.h"
 #include "kex.h"
@@ -71,19 +72,10 @@ input_kex_c25519_init(int type, u_int32_t seq, void *ctxt)
 #ifdef DEBUG_KEXECDH
 	dump_digest("server private key:", server_key, sizeof(server_key));
 #endif
-	if (kex->load_host_public_key == NULL ||
-	    kex->load_host_private_key == NULL) {
-		r = SSH_ERR_INVALID_ARGUMENT;
+
+	r = kex_load_host_keys(kex, ssh, &server_host_public, &server_host_private);
+	if (r != SSH_ERR_SUCCESS)
 		goto out;
-	}
-	server_host_public = kex->load_host_public_key(kex->hostkey_type,
-	    kex->hostkey_nid, ssh);
-	server_host_private = kex->load_host_private_key(kex->hostkey_type,
-	    kex->hostkey_nid, ssh);
-	if (server_host_public == NULL) {
-		r = SSH_ERR_NO_HOSTKEY_LOADED;
-		goto out;
-	}
 
 	if ((r = sshpkt_get_string(ssh, &client_pubkey, &pklen)) != 0 ||
 	    (r = sshpkt_get_end(ssh)) != 0)
@@ -105,9 +97,9 @@ input_kex_c25519_init(int type, u_int32_t seq, void *ctxt)
 		goto out;
 
 	/* calc H */
-	if ((r = sshkey_to_blob(server_host_public, &server_host_key_blob,
-	    &sbloblen)) != 0)
-		goto out;
+	r = Xkey_to_blob(kex->hostkey_alg, server_host_public, &server_host_key_blob, &sbloblen);
+	if (r != SSH_ERR_SUCCESS) goto out;
+
 	hashlen = sizeof(hash);
 	if ((r = kex_c25519_hash(
 	    kex->hash_alg,

@@ -6,6 +6,9 @@
 # Unbreak GNU head(1)
 _POSIX2_VERSION=199209
 export _POSIX2_VERSION
+TEST_SHELL=${TEST_SHELL-sh}
+
+. ../tests/CA/shell.rc
 
 case `uname -s 2>/dev/null` in
 OSF1*)
@@ -55,13 +58,20 @@ if [ ! -f $SCRIPT ]; then
 	echo "not a file: $SCRIPT"
 	exit 2
 fi
-if $TEST_SHELL -n $SCRIPT; then
-	true
+case $TEST_SHELL in
+	*zsh*)	# turn on NULL_GLOB
+		$TEST_SHELL -G -n $SCRIPT;;
+	*)
+		$TEST_SHELL -n $SCRIPT;;
+esac
+ret=$?
+if test 0 -eq $ret; then
+	:
 else
 	echo "syntax error in $SCRIPT"
 	exit 2
 fi
-unset SSH_AUTH_SOCK
+unset SSH_AUTH_SOCK || :
 
 SRC=`dirname ${SCRIPT}`
 
@@ -209,6 +219,7 @@ fi
 if [ "x$TEST_REGRESS_LOGFILE" = "x" ]; then
 	TEST_REGRESS_LOGFILE=$OBJ/regress.log
 fi
+echo "=== $SCRIPT ..." >> $TEST_SSH_LOGFILE
 
 # truncate logfiles
 >$TEST_SSH_LOGFILE
@@ -246,6 +257,11 @@ increase_datafile_size()
 # these should be used in tests
 export SSH SSHD SSHAGENT SSHADD SSHKEYGEN SSHKEYSCAN SFTP SFTPSERVER SCP
 #echo $SSH $SSHD $SSHAGENT $SSHADD $SSHKEYGEN $SSHKEYSCAN $SFTP $SFTPSERVER $SCP
+
+# NOTE: always unset OPENSSL_FIPS even for build with FIPS
+# capable OpenSSL library. It will be set latter only if
+# fips test is requested.
+unset OPENSSL_FIPS || :
 
 # Portable specific functions
 have_prog()
@@ -549,6 +565,13 @@ fi
 	cat $OBJ/ssh_config
 	echo proxycommand ${SUDO} sh ${SRC}/sshd-log-wrapper.sh ${TEST_SSHD_LOGFILE} ${SSHD} -i -f $OBJ/sshd_proxy
 ) > $OBJ/ssh_proxy
+
+case $SCRIPT in
+  */fips-*)
+    OPENSSL_FIPS=1
+    export OPENSSL_FIPS
+    ;;
+esac
 
 # check proxy config
 ${SSHD} -t -f $OBJ/sshd_proxy	|| fatal "sshd_proxy broken"

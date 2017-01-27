@@ -14,7 +14,7 @@ cp $OBJ/ssh_proxy $OBJ/ssh_proxy_bak
 # Traditional and builtin key types.
 ktypes="dsa-1024 rsa-2048 rsa-3072 ed25519-512"
 # Types not present in all OpenSSL versions.
-for i in `$SSH -Q key`; do
+for i in `$SSH -Q key | grep -v "^x509v3-" `; do
 	case "$i" in
 		ecdsa-sha2-nistp256)	ktypes="$ktypes ecdsa-256" ;;
 		ecdsa-sha2-nistp384)	ktypes="$ktypes ecdsa-384" ;;

@@ -67,6 +67,7 @@
 #include <stdarg.h>
 #include <string.h>
 
+#include "evp-compat.h"
 #include "rsa.h"
 #include "log.h"
 #include "ssherr.h"
@@ -74,13 +75,16 @@
 int
 rsa_public_encrypt(BIGNUM *out, BIGNUM *in, RSA *key)
 {
+	const BIGNUM *n = NULL, *e = NULL;
 	u_char *inbuf = NULL, *outbuf = NULL;
 	int len, ilen, olen, r = SSH_ERR_INTERNAL_ERROR;
 
-	if (BN_num_bits(key->e) < 2 || !BN_is_odd(key->e))
+	RSA_get0_key(key, &n, &e, NULL);
+
+	if (BN_num_bits(e) < 2 || !BN_is_odd(e))
 		return SSH_ERR_INVALID_ARGUMENT;
 
-	olen = BN_num_bytes(key->n);
+	olen = BN_num_bytes(n);
 	if ((outbuf = malloc(olen)) == NULL) {
 		r = SSH_ERR_ALLOC_FAIL;
 		goto out;
@@ -120,10 +124,13 @@ rsa_public_encrypt(BIGNUM *out, BIGNUM *in, RSA *key)
 int
 rsa_private_decrypt(BIGNUM *out, BIGNUM *in, RSA *key)
 {
+	const BIGNUM *n = NULL;
 	u_char *inbuf = NULL, *outbuf = NULL;
 	int len, ilen, olen, r = SSH_ERR_INTERNAL_ERROR;
 
-	olen = BN_num_bytes(key->n);
+	RSA_get0_key(key, &n, NULL, NULL);
+
+	olen = BN_num_bytes(n);
 	if ((outbuf = malloc(olen)) == NULL) {
 		r = SSH_ERR_ALLOC_FAIL;
 		goto out;
@@ -162,6 +169,8 @@ int
 rsa_generate_additional_parameters(RSA *rsa)
 {
 	BIGNUM *aux = NULL;
+	const BIGNUM *p = NULL, *q = NULL;
+	BIGNUM *d = NULL, *dmp1 = NULL, *dmq1 = NULL;
 	BN_CTX *ctx = NULL;
 	int r;
 
@@ -172,10 +181,14 @@ rsa_generate_additional_parameters(RSA *rsa)
 		goto out;
 	}
 
-	if ((BN_sub(aux, rsa->q, BN_value_one()) == 0) ||
-	    (BN_mod(rsa->dmq1, rsa->d, aux, ctx) == 0) ||
-	    (BN_sub(aux, rsa->p, BN_value_one()) == 0) ||
-	    (BN_mod(rsa->dmp1, rsa->d, aux, ctx) == 0)) {
+	RSA_get0_key(rsa, NULL, NULL, (const BIGNUM**)&d);
+	RSA_get0_factors(rsa, &p, &q);
+	RSA_get0_crt_params(rsa, (const BIGNUM**)&dmp1, (const BIGNUM**)&dmq1, NULL);
+
+	if ((BN_sub(aux, q, BN_value_one()) == 0) ||
+	    (BN_mod(dmq1, d, aux, ctx) == 0) ||
+	    (BN_sub(aux, p, BN_value_one()) == 0) ||
+	    (BN_mod(dmp1, d, aux, ctx) == 0)) {
 		r = SSH_ERR_LIBCRYPTO_ERROR;
 		goto out;
 	}

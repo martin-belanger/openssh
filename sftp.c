@@ -71,6 +71,19 @@ typedef void EditLine;
 #include "sftp-common.h"
 #include "sftp-client.h"
 
+#ifndef HAVE_MBLEN
+/* on Android function mblen is declared but not defined ! */
+/* multibyte character support */
+extern int mblen(const char *, size_t);
+
+inline int
+mblen(const char *s, size_t n) {
+	(void)s;
+	(void)n;
+	return 1;
+}
+#endif
+
 #define DEFAULT_COPY_BUFLEN	32768	/* Size of buffer for up/download */
 #define DEFAULT_NUM_REQUESTS	64	/* # concurrent outstanding requests */
 

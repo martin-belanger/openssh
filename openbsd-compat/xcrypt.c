@@ -63,6 +63,13 @@
 #  define crypt DES_crypt
 # endif
 
+#ifndef HAVE_SETPWENT
+/*FIXME: detect by configure */
+#  define HAVE_SETPWENT 1
+#endif
+#ifdef __ANDROID__
+# undef HAVE_SETPWENT
+#endif
 /*
  * Pick an appropriate password encryption type and salt for the running
  * system by searching through accounts until we find one that has a valid
@@ -80,6 +87,7 @@ pick_salt(void)
 	if (salt[0] != '\0')
 		return salt;
 	strlcpy(salt, "xx", sizeof(salt));
+#ifdef HAVE_SETPWENT
 	setpwent();
 	while ((pw = getpwent()) != NULL) {
 		passwd = shadow_pw(pw);
@@ -92,6 +100,7 @@ pick_salt(void)
 	}
  out:
 	endpwent();
+#endif /*def HAVE_SETPWENT*/
 	return salt;
 }
 
@@ -120,6 +129,8 @@ xcrypt(const char *password, const char *salt)
 # elif defined(HAVE_SECUREWARE)
 	crypted = bigcrypt(password, salt);
 # else
+	/* if password is NULL (on Android ...) */
+	if (password == NULL) return NULL;
 	crypted = crypt(password, salt);
 # endif
 

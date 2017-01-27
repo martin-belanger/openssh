@@ -13,6 +13,7 @@
 .\" Copyright (c) 1999,2000 Markus Friedl.  All rights reserved.
 .\" Copyright (c) 1999 Aaron Campbell.  All rights reserved.
 .\" Copyright (c) 1999 Theo de Raadt.  All rights reserved.
+.\" Copyright (c) 2002-2016 Roumen Petrov.  All rights reserved.
 .\"
 .\" Redistribution and use in source and binary forms, with or without
 .\" modification, are permitted provided that the following conditions
@@ -34,6 +35,14 @@
 .\" (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 .\" THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 .\"
+.\" Implement .Dd with the Mdocdate RCS keyword
+.rn Dd xD
+.de Dd
+.ie \\$1$Mdocdate: \{\
+.	xD \\$2 \\$3, \\$4
+.\}
+.el .xD \\$1 \\$2 \\$3 \\$4 \\$5 \\$6 \\$7 \\$8
+..
 .Dd $Mdocdate: November 30 2016 $
 .Dt SSH-AGENT 1
 .Os
@@ -56,6 +65,10 @@
 .Nm
 is a program to hold private keys used for public key authentication
 (RSA, DSA, ECDSA, Ed25519).
+It may contain X.509 certificates that match private keys and
+extra certificates used to build chain of certificates
+leading to a trusted certificate authority.
+.Pp
 .Nm
 is usually started in the beginning of an X-session or a login session, and
 all other windows or programs are started as clients to the ssh-agent
@@ -229,3 +242,5 @@ and
 removed many bugs, re-added newer features and created OpenSSH.
 .An Markus Friedl
 contributed the support for SSH protocol versions 1.5 and 2.0.
+.An Roumen Petrov
+contributed support for X.509 certificates.

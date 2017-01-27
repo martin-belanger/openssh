@@ -13,6 +13,8 @@
  *
  * SSH2 implementation,
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
+ * X509 certificate support,
+ * Copyright (c) 2002 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -49,6 +51,7 @@
 #include <unistd.h>
 #include <errno.h>
 
+#include "evp-compat.h"
 #include "xmalloc.h"
 #include "ssh.h"
 #include "rsa.h"
@@ -210,12 +213,16 @@ deserialise_identity1(struct sshbuf *ids, struct sshkey **keyp, char **commentp)
 
 	if ((key = sshkey_new(KEY_RSA1)) == NULL)
 		return SSH_ERR_ALLOC_FAIL;
+	{
+	BIGNUM *n = NULL, *e = NULL;
+	RSA_get0_key(key->rsa, (const BIGNUM**)&n, (const BIGNUM**)&e, NULL);
 	if ((r = sshbuf_get_u32(ids, &bits)) != 0 ||
-	    (r = sshbuf_get_bignum1(ids, key->rsa->e)) != 0 ||
-	    (r = sshbuf_get_bignum1(ids, key->rsa->n)) != 0 ||
+	    (r = sshbuf_get_bignum1(ids, e)) != 0 ||
+	    (r = sshbuf_get_bignum1(ids, n)) != 0 ||
 	    (r = sshbuf_get_cstring(ids, &comment, NULL)) != 0)
 		goto out;
-	keybits = BN_num_bits(key->rsa->n);
+	keybits = BN_num_bits(n);
+	}
 	/* XXX previously we just warned here. I think we should be strict */
 	if (keybits < 0 || bits != (u_int)keybits) {
 		r = SSH_ERR_KEY_BITS_MISMATCH;
@@ -398,14 +405,18 @@ ssh_decrypt_challenge(int sock, struct sshkey* key, BIGNUM *challenge,
 		return SSH_ERR_INVALID_ARGUMENT;
 	if ((msg = sshbuf_new()) == NULL)
 		return SSH_ERR_ALLOC_FAIL;
+	{
+	const BIGNUM *n = NULL, *e = NULL;
+	RSA_get0_key(key->rsa, &n, &e, NULL);
 	if ((r = sshbuf_put_u8(msg, SSH_AGENTC_RSA_CHALLENGE)) != 0 ||
-	    (r = sshbuf_put_u32(msg, BN_num_bits(key->rsa->n))) != 0 ||
-	    (r = sshbuf_put_bignum1(msg, key->rsa->e)) != 0 ||
-	    (r = sshbuf_put_bignum1(msg, key->rsa->n)) != 0 ||
+	    (r = sshbuf_put_u32(msg, BN_num_bits(n))) != 0 ||
+	    (r = sshbuf_put_bignum1(msg, e)) != 0 ||
+	    (r = sshbuf_put_bignum1(msg, n)) != 0 ||
 	    (r = sshbuf_put_bignum1(msg, challenge)) != 0 ||
 	    (r = sshbuf_put(msg, session_id, 16)) != 0 ||
 	    (r = sshbuf_put_u32(msg, 1)) != 0) /* Response type for proto 1.1 */
 		goto out;
+	}
 	if ((r = ssh_request_reply(sock, msg, msg)) != 0)
 		goto out;
 	if ((r = sshbuf_get_u8(msg, &type)) != 0)
@@ -499,15 +510,20 @@ static int
 ssh_encode_identity_rsa1(struct sshbuf *b, RSA *key, const char *comment)
 {
 	int r;
+	const BIGNUM *n = NULL, *e = NULL, *d = NULL;
+	const BIGNUM *iqmp = NULL, *p = NULL, *q = NULL;
 
+	RSA_get0_key(key, &n, &e, &d);
+	RSA_get0_crt_params(key, NULL, NULL, &iqmp);
+	RSA_get0_factors(key, &p, &q);
 	/* To keep within the protocol: p < q for ssh. in SSL p > q */
-	if ((r = sshbuf_put_u32(b, BN_num_bits(key->n))) != 0 ||
-	    (r = sshbuf_put_bignum1(b, key->n)) != 0 ||
-	    (r = sshbuf_put_bignum1(b, key->e)) != 0 ||
-	    (r = sshbuf_put_bignum1(b, key->d)) != 0 ||
-	    (r = sshbuf_put_bignum1(b, key->iqmp)) != 0 ||
-	    (r = sshbuf_put_bignum1(b, key->q)) != 0 ||
-	    (r = sshbuf_put_bignum1(b, key->p)) != 0 ||
+	if ((r = sshbuf_put_u32(b, BN_num_bits(n))) != 0 ||
+	    (r = sshbuf_put_bignum1(b, n)) != 0 ||
+	    (r = sshbuf_put_bignum1(b, e)) != 0 ||
+	    (r = sshbuf_put_bignum1(b, d)) != 0 ||
+	    (r = sshbuf_put_bignum1(b, iqmp)) != 0 ||
+	    (r = sshbuf_put_bignum1(b, q)) != 0 ||
+	    (r = sshbuf_put_bignum1(b, p)) != 0 ||
 	    (r = sshbuf_put_cstring(b, comment)) != 0)
 		return r;
 	return 0;
@@ -560,7 +576,7 @@ ssh_add_identity_constrained(int sock, struct sshkey *key, const char *comment,
 	if ((msg = sshbuf_new()) == NULL)
 		return SSH_ERR_ALLOC_FAIL;
 
-	switch (key->type) {
+	switch (X509KEY_BASETYPE(key)) {
 #ifdef WITH_SSH1
 	case KEY_RSA1:
 		type = constrained ?
@@ -622,11 +638,13 @@ ssh_remove_identity(int sock, struct sshkey *key)
 
 #ifdef WITH_SSH1
 	if (key->type == KEY_RSA1) {
+		const BIGNUM *n = NULL, *e = NULL;
+		RSA_get0_key(key->rsa, &n, &e, NULL);
 		if ((r = sshbuf_put_u8(msg,
 		    SSH_AGENTC_REMOVE_RSA_IDENTITY)) != 0 ||
-		    (r = sshbuf_put_u32(msg, BN_num_bits(key->rsa->n))) != 0 ||
-		    (r = sshbuf_put_bignum1(msg, key->rsa->e)) != 0 ||
-		    (r = sshbuf_put_bignum1(msg, key->rsa->n)) != 0)
+		    (r = sshbuf_put_u32(msg, BN_num_bits(n))) != 0 ||
+		    (r = sshbuf_put_bignum1(msg, e)) != 0 ||
+		    (r = sshbuf_put_bignum1(msg, n)) != 0)
 			goto out;
 	} else
 #endif
@@ -661,6 +679,7 @@ ssh_remove_identity(int sock, struct sshkey *key)
  */
 int
 ssh_update_card(int sock, int add, const char *reader_id, const char *pin,
+    const char *xstore,
     u_int life, u_int confirm)
 {
 	struct sshbuf *msg;
@@ -678,7 +697,8 @@ ssh_update_card(int sock, int add, const char *reader_id, const char *pin,
 		return SSH_ERR_ALLOC_FAIL;
 	if ((r = sshbuf_put_u8(msg, type)) != 0 ||
 	    (r = sshbuf_put_cstring(msg, reader_id)) != 0 ||
-	    (r = sshbuf_put_cstring(msg, pin)) != 0)
+	    (r = sshbuf_put_cstring(msg, pin)) != 0 ||
+	    (r = sshbuf_put_cstring(msg, xstore)) != 0)
 		goto out;
 	if (constrained &&
 	    (r = encode_constraints(msg, life, confirm)) != 0)

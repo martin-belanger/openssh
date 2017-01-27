@@ -34,6 +34,7 @@
 #include <signal.h>
 
 #include "sshkey.h"
+#include "ssh-x509.h"
 #include "cipher.h"
 #include "kex.h"
 #include "log.h"
@@ -87,14 +88,13 @@ input_kex_c25519_reply(int type, u_int32_t seq, void *ctxt)
 	}
 
 	/* hostkey */
-	if ((r = sshpkt_get_string(ssh, &server_host_key_blob,
-	    &sbloblen)) != 0 ||
-	    (r = sshkey_from_blob(server_host_key_blob, sbloblen,
-	    &server_host_key)) != 0)
-		goto out;
-	if (server_host_key->type != kex->hostkey_type ||
-	    (kex->hostkey_type == KEY_ECDSA &&
-	    server_host_key->ecdsa_nid != kex->hostkey_nid)) {
+	r = sshpkt_get_string(ssh, &server_host_key_blob, &sbloblen);
+	if (r != 0) goto out;
+
+	r = Xkey_from_blob(kex->hostkey_alg, server_host_key_blob, sbloblen, &server_host_key);
+	if (r != SSH_ERR_SUCCESS) goto out;
+
+	if (!sshkey_match_pkalg(server_host_key, kex->hostkey_alg)) {
 		r = SSH_ERR_KEY_TYPE_MISMATCH;
 		goto out;
 	}

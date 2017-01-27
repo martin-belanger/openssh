@@ -215,6 +215,16 @@ extern Buffer loginmsg;
 /* pick the shortest string */
 #define MIN_SIZEOF(s1,s2) (sizeof(s1) < sizeof(s2) ? sizeof(s1) : sizeof(s2))
 
+#if defined(__ANDROID__)
+/* Android define only user process */
+#ifndef DEAD_PROCESS
+#  define DEAD_PROCESS	USER_PROCESS
+#endif
+#ifndef LOGIN_PROCESS
+#  define LOGIN_PROCESS	USER_PROCESS
+#endif
+#endif
+
 /**
  ** platform-independent login functions
  **/

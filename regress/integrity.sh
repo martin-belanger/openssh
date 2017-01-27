@@ -19,8 +19,10 @@ macs="$macs `${SSH} -Q cipher-auth`"
 echo "KexAlgorithms diffie-hellman-group14-sha1,diffie-hellman-group1-sha1" \
 	>> $OBJ/ssh_proxy
 
+SH=${TEST_SHELL-sh}
+
 # sshd-command for proxy (see test-exec.sh)
-cmd="$SUDO sh ${SRC}/sshd-log-wrapper.sh ${TEST_SSHD_LOGFILE} ${SSHD} -i -f $OBJ/sshd_proxy"
+cmd="$SUDO $SH ${SRC}/sshd-log-wrapper.sh ${TEST_SSHD_LOGFILE} ${SSHD} -i -f $OBJ/sshd_proxy"
 
 for m in $macs; do
 	trace "test $tid: mac $m"

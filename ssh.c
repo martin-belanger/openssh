@@ -19,6 +19,9 @@
  * Modified to work with SSL by Niels Provos <provos@citi.umich.edu>
  * in Canada (German citizen).
  *
+ * X.509 certificates support:
+ * Copyright (c) 2002,2003,2011,2012 Roumen Petrov.  All rights reserved.
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -77,7 +80,16 @@
 #include <openssl/err.h>
 #endif
 #include "openbsd-compat/openssl-compat.h"
+
+#ifdef HAVE_FIPSCHECK_H
+#  include <fipscheck.h>
+#endif
+
 #include "openbsd-compat/sys-queue.h"
+#ifdef LDAP_ENABLED
+/* OpenSSL extension defined in x509_by_ldap.c */
+extern void ERR_load_X509byLDAP_strings(void);
+#endif
 
 #include "xmalloc.h"
 #include "ssh.h"
@@ -91,6 +103,8 @@
 #include "buffer.h"
 #include "channels.h"
 #include "key.h"
+#include "ssh-x509.h"
+#include "key-eng.h"
 #include "authfd.h"
 #include "authfile.h"
 #include "pathnames.h"
@@ -121,6 +135,10 @@ extern char *__progname;
 #ifndef HAVE_SETPROCTITLE
 static char **saved_av;
 #endif
+
+/* used in ssh-x509.c */
+extern int (*pssh_x509store_verify_cert)(X509 *_cert, STACK_OF(X509) *_chain);
+extern STACK_OF(X509)* (*pssh_x509store_build_certchain)(X509 *cert, STACK_OF(X509) *untrusted);
 
 /* Flag indicating whether debug mode is on.  May be set on the command line. */
 int debug_flag = 0;
@@ -162,6 +180,9 @@ Options options;
 /* optional user configfile */
 char *config = NULL;
 
+/* user engine configfile */
+char *engconfig = NULL;
+
 /*
  * Name of the host we are connecting to.  This is the name given on the
  * command line, or the HostName specified for the user-supplied name in a
@@ -198,9 +219,13 @@ static void
 usage(void)
 {
 	fprintf(stderr,
-"usage: ssh [-1246AaCfGgKkMNnqsTtVvXxYy] [-b bind_address] [-c cipher_spec]\n"
+"usage: ssh [-1246AaCdfgKkMNnqsTtVvXxYy] [-b bind_address] [-c cipher_spec]\n"
 "           [-D [bind_address:]port] [-E log_file] [-e escape_char]\n"
-"           [-F configfile] [-I pkcs11] [-i identity_file]\n"
+"           [-F configfile]\n"
+#ifdef USE_OPENSSL_ENGINE
+"           [-G engineconfigfile]\n"
+#endif
+"           [-I pkcs11] [-i identity_file]\n"
 "           [-J [user@]host[:port]] [-L address] [-l login_name] [-m mac_spec]\n"
 "           [-O ctl_cmd] [-o option] [-p port] [-Q query_option] [-R address]\n"
 "           [-S ctl_path] [-W host:port] [-w local_tun[:remote_tun]]\n"
@@ -530,6 +555,15 @@ main(int ac, char **av)
 	sanitise_stdfd();
 
 	__progname = ssh_get_progname(av[0]);
+	ssh_OpenSSL_startup();
+#ifdef HAVE_FIPSCHECK_H
+	if (FIPS_mode() && !FIPSCHECK_verify(NULL, NULL)) {
+		fatal("FIPS integrity verification test failed.");
+	}
+#endif
+	ssh_engines_startup();
+	pssh_x509store_verify_cert = ssh_x509store_verify_cert;
+	pssh_x509store_build_certchain = ssh_x509store_build_certchain;
 
 #ifndef HAVE_SETPROCTITLE
 	/* Prepare for later setproctitle emulation */
@@ -605,8 +639,14 @@ main(int ac, char **av)
 	argv0 = av[0];
 
  again:
-	while ((opt = getopt(ac, av, "1246ab:c:e:fgi:kl:m:no:p:qstvx"
-	    "ACD:E:F:GI:J:KL:MNO:PQ:R:S:TVw:W:XYy")) != -1) {
+#ifdef USE_OPENSSL_ENGINE
+#  define ENGCONFIG "G:"
+#else
+#  define ENGCONFIG ""
+#endif
+
+	while ((opt = getopt(ac, av, "1246ab:c:de:fgi:kl:m:no:p:qstvx"
+	    "ACD:E:F:" ENGCONFIG "I:J:KL:MNO:PQ:R:S:TVw:W:XYy")) != -1) {
 		switch (opt) {
 		case '1':
 			options.protocol = SSH_PROTO_1;
@@ -639,7 +679,7 @@ main(int ac, char **av)
 		case 'E':
 			logfile = optarg;
 			break;
-		case 'G':
+		case 'd':
 			config_test = 1;
 			break;
 		case 'Y':
@@ -716,13 +756,16 @@ main(int ac, char **av)
 			options.gss_deleg_creds = 1;
 			break;
 		case 'i':
-			p = tilde_expand_filename(optarg, original_real_uid);
-			if (stat(p, &st) < 0)
+			p = strncmp(optarg, "engine:", 7)
+				? tilde_expand_filename(optarg, original_real_uid)
+				: NULL;
+			if (p != NULL &&
+			    stat(p, &st) < 0)
 				fprintf(stderr, "Warning: Identity file %s "
 				    "not accessible: %s.\n", p,
 				    strerror(errno));
 			else
-				add_identity_file(&options, NULL, p, 1);
+				add_identity_file(&options, NULL, p != NULL ? p : optarg, 1);
 			free(p);
 			break;
 		case 'I':
@@ -931,6 +974,11 @@ main(int ac, char **av)
 		case 'F':
 			config = optarg;
 			break;
+#ifdef USE_OPENSSL_ENGINE
+		case 'G':
+			engconfig = optarg;
+			break;
+#endif
 		default:
 			usage();
 		}
@@ -964,8 +1012,10 @@ main(int ac, char **av)
 	host_arg = xstrdup(host);
 
 #ifdef WITH_OPENSSL
-	OpenSSL_add_all_algorithms();
 	ERR_load_crypto_strings();
+#ifdef LDAP_ENABLED
+	ERR_load_X509byLDAP_strings();
+#endif
 #endif
 
 	/* Initialize the command to execute on remote host. */
@@ -1018,6 +1068,28 @@ main(int ac, char **av)
 		    "without OpenSSL"
 #endif
 		);
+
+#ifdef USE_OPENSSL_ENGINE
+	/* process per-user engine configuration file */
+	if (engconfig != NULL) {
+		r = process_engconfig_file(engconfig);
+	} else {
+		r = snprintf(buf, sizeof(buf), "%s/%s", pw->pw_dir,
+		    _PATH_SSH_ENGINE_CONFFILE);
+		if (r > 0 && (size_t)r < sizeof(buf))
+			r = process_engconfig_file(buf);
+		else
+			r = 0;
+	}
+	if (!r) {
+		if (engconfig != NULL)
+			debug("Can't process engine config file %.100s:"
+			    " %.100s", engconfig, strerror(errno));
+		else
+			debug("Can't process default engine config file:"
+			    " %.100s", strerror(errno));
+	}
+#endif
 
 	/* Parse the configuration files */
 	process_config_files(host_arg, pw, 0);
@@ -1124,6 +1196,15 @@ main(int ac, char **av)
 		debug("Setting implicit ProxyCommand from ProxyJump: %s",
 		    options.proxy_command);
 	}
+
+#ifdef OPENSSL_FIPS
+	if (FIPS_mode()) {
+		if (options.protocol & SSH_PROTO_1)
+			fatal("Protocol 1 not allowed in the FIPS mode.");
+		if (options.protocol & ~SSH_PROTO_2)
+			fatal("Only protocol 2 is allowed FIPS mode.");
+	}
+#endif
 
 	if (options.port == 0)
 		options.port = default_ssh_port();
@@ -1460,6 +1541,9 @@ main(int ac, char **av)
 
 	/* Kill ProxyCommand if it is running. */
 	ssh_kill_proxy_command();
+
+	ssh_engines_shutdown();
+	ssh_OpenSSL_shuthdown();
 
 	return exit_status;
 }
@@ -2069,6 +2153,7 @@ load_public_identity_files(void)
 				key_free(keys[i]);
 				continue;
 			}
+			x509key_build_chain(keys[i]);
 			identity_keys[n_ids] = keys[i];
 			identity_files[n_ids] =
 			    xstrdup(options.pkcs11_provider); /* XXX */

@@ -37,7 +37,9 @@
 #include <string.h>
 #include <signal.h>
 
+#include "evp-compat.h"
 #include "sshkey.h"
+#include "ssh-x509.h"
 #include "cipher.h"
 #include "digest.h"
 #include "kex.h"
@@ -118,19 +120,25 @@ input_kex_dh_gex_group(int type, u_int32_t seq, void *ctxt)
 	}
 	p = g = NULL; /* belong to kex->dh now */
 
+{
 	/* generate and send 'e', client DH public key */
-	if ((r = dh_gen_key(kex->dh, kex->we_need * 8)) != 0 ||
-	    (r = sshpkt_start(ssh, SSH2_MSG_KEX_DH_GEX_INIT)) != 0 ||
-	    (r = sshpkt_put_bignum2(ssh, kex->dh->pub_key)) != 0 ||
+	const BIGNUM *pub_key = NULL;
+
+	if ((r = dh_gen_key(kex->dh, kex->we_need * 8)))
+		goto out;
+	DH_get0_key(kex->dh, &pub_key, NULL);
+	if ((r = sshpkt_start(ssh, SSH2_MSG_KEX_DH_GEX_INIT)) != 0 ||
+	    (r = sshpkt_put_bignum2(ssh, pub_key)) != 0 ||
 	    (r = sshpkt_send(ssh)) != 0)
 		goto out;
 	debug("SSH2_MSG_KEX_DH_GEX_INIT sent");
 #ifdef DEBUG_KEXDH
 	DHparams_print_fp(stderr, kex->dh);
 	fprintf(stderr, "pub= ");
-	BN_print_fp(stderr, kex->dh->pub_key);
+	BN_print_fp(stderr, pub_key);
 	fprintf(stderr, "\n");
 #endif
+}
 	ssh_dispatch_set(ssh, SSH2_MSG_KEX_DH_GEX_GROUP, NULL);
 	ssh_dispatch_set(ssh, SSH2_MSG_KEX_DH_GEX_REPLY, &input_kex_dh_gex_reply);
 	r = 0;
@@ -160,18 +168,13 @@ input_kex_dh_gex_reply(int type, u_int32_t seq, void *ctxt)
 		goto out;
 	}
 	/* key, cert */
-	if ((r = sshpkt_get_string(ssh, &server_host_key_blob,
-	    &sbloblen)) != 0 ||
-	    (r = sshkey_from_blob(server_host_key_blob, sbloblen,
-	    &server_host_key)) != 0)
-		goto out;
-	if (server_host_key->type != kex->hostkey_type) {
-		r = SSH_ERR_KEY_TYPE_MISMATCH;
-		goto out;
-	}
-	if (server_host_key->type != kex->hostkey_type ||
-	    (kex->hostkey_type == KEY_ECDSA &&
-	    server_host_key->ecdsa_nid != kex->hostkey_nid)) {
+	r = sshpkt_get_string(ssh, &server_host_key_blob, &sbloblen);
+	if (r != 0) goto out;
+
+	r = Xkey_from_blob(kex->hostkey_alg, server_host_key_blob, sbloblen, &server_host_key);
+	if (r != SSH_ERR_SUCCESS) goto out;
+
+	if (!sshkey_match_pkalg(server_host_key, kex->hostkey_alg)) {
 		r = SSH_ERR_KEY_TYPE_MISMATCH;
 		goto out;
 	}
@@ -218,6 +221,12 @@ input_kex_dh_gex_reply(int type, u_int32_t seq, void *ctxt)
 	if (ssh->compat & SSH_OLD_DHGEX)
 		kex->min = kex->max = -1;
 
+{
+	const BIGNUM *p = NULL, *g = NULL, *pub_key = NULL;
+
+	DH_get0_pqg(kex->dh, &p, NULL, &g);
+	DH_get0_key(kex->dh, &pub_key, NULL);
+
 	/* calc and verify H */
 	hashlen = sizeof(hash);
 	if ((r = kexgex_hash(
@@ -228,12 +237,13 @@ input_kex_dh_gex_reply(int type, u_int32_t seq, void *ctxt)
 	    sshbuf_ptr(kex->peer), sshbuf_len(kex->peer),
 	    server_host_key_blob, sbloblen,
 	    kex->min, kex->nbits, kex->max,
-	    kex->dh->p, kex->dh->g,
-	    kex->dh->pub_key,
+	    p, g,
+	    pub_key,
 	    dh_server_pub,
 	    shared_secret,
 	    hash, &hashlen)) != 0)
 		goto out;
+}
 
 	if ((r = sshkey_verify(server_host_key, signature, slen, hash,
 	    hashlen, ssh->compat)) != 0)

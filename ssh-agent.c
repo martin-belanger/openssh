@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh-agent.c,v 1.216 2017/01/04 02:21:43 djm Exp $ */
+/* $OpenBSD: ssh-agent.c,v 1.215 2016/11/30 03:07:37 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -12,6 +12,8 @@
  * called by a name other than "ssh" or "Secure Shell".
  *
  * Copyright (c) 2000, 2001 Markus Friedl.  All rights reserved.
+ * X.509 certificates support,
+ * Copyright (c) 2002-2016 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -51,6 +53,7 @@
 
 #ifdef WITH_OPENSSL
 #include <openssl/evp.h>
+#include "evp-compat.h"
 #include "openbsd-compat/openssl-compat.h"
 #endif
 
@@ -79,6 +82,9 @@
 #include "authfd.h"
 #include "compat.h"
 #include "log.h"
+#include "ssh-x509.h"
+#include "ssh-xkalg.h"
+#include "x509store.h"
 #include "misc.h"
 #include "digest.h"
 #include "ssherr.h"
@@ -86,10 +92,30 @@
 
 #ifdef ENABLE_PKCS11
 #include "ssh-pkcs11.h"
-#endif
+
+/* used in ssh-x509.c */
+extern STACK_OF(X509)* (*pssh_x509store_build_certchain)(X509 *cert, STACK_OF(X509) *untrusted);
+
+/* minimize dependencies */
+#if 1	/* used in x509store.c */
+
+int
+ssh_ocsp_validate(X509 *cert, X509_STORE *x509store) {
+	(void)cert;
+	(void)x509store;
+	return(-1);
+}
+
+X509_LOOKUP_METHOD* X509_LOOKUP_ldap(void);
+X509_LOOKUP_METHOD*
+X509_LOOKUP_ldap(void) {
+	return(NULL);
+}
+#endif	/* end of used in x509store.c */
+#endif	/*def ENABLE_PKCS11*/
 
 #ifndef DEFAULT_PKCS11_WHITELIST
-# define DEFAULT_PKCS11_WHITELIST "/usr/lib*/*,/usr/local/lib*/*"
+# define DEFAULT_PKCS11_WHITELIST "/usr/lib/*,/usr/local/lib/*"
 #endif
 
 typedef enum {
@@ -197,6 +223,24 @@ free_identity(Identity *id)
 	free(id);
 }
 
+static int/*bool*/
+key_match(const struct sshkey *key, struct sshkey *found) {
+	int kt, ret;
+	int bt;
+
+	kt = found->type;
+	if (key->type == kt)
+		return(sshkey_equal(key, found));
+
+	bt = X509KEY_BASETYPE(found);
+	if (kt == bt) return(0);
+	found->type = bt;
+
+	ret = sshkey_equal(key, found);
+	found->type = kt;
+	return(ret);
+}
+
 /* return matching private key for given public key */
 static Identity *
 lookup_identity(struct sshkey *key, int version)
@@ -205,7 +249,7 @@ lookup_identity(struct sshkey *key, int version)
 
 	Idtab *tab = idtab_lookup(version);
 	TAILQ_FOREACH(id, &tab->idlist, next) {
-		if (sshkey_equal(key, id->key))
+		if (key_match(key, id->key))
 			return (id);
 	}
 	return (NULL);
@@ -258,12 +302,14 @@ process_request_identities(SocketEntry *e, int version)
 	TAILQ_FOREACH(id, &tab->idlist, next) {
 		if (id->key->type == KEY_RSA1) {
 #ifdef WITH_SSH1
+			const BIGNUM *rsa_n = NULL, *rsa_e = NULL;
+			RSA_get0_key(id->key->rsa, &rsa_n, &rsa_e, NULL);
 			if ((r = sshbuf_put_u32(msg,
-			    BN_num_bits(id->key->rsa->n))) != 0 ||
+			    BN_num_bits(rsa_n))) != 0 ||
 			    (r = sshbuf_put_bignum1(msg,
-			    id->key->rsa->e)) != 0 ||
+			    rsa_e)) != 0 ||
 			    (r = sshbuf_put_bignum1(msg,
-			    id->key->rsa->n)) != 0)
+			    rsa_n)) != 0)
 				fatal("%s: buffer error: %s",
 				    __func__, ssh_err(r));
 #endif
@@ -302,6 +348,7 @@ process_authentication_challenge1(SocketEntry *e)
 	struct sshbuf *msg;
 	struct ssh_digest_ctx *md;
 	struct sshkey *key;
+	BIGNUM *rsa_n = NULL, *rsa_e = NULL;
 
 	if ((msg = sshbuf_new()) == NULL)
 		fatal("%s: sshbuf_new failed", __func__);
@@ -310,9 +357,10 @@ process_authentication_challenge1(SocketEntry *e)
 	if ((challenge = BN_new()) == NULL)
 		fatal("%s: BN_new failed", __func__);
 
+	RSA_get0_key(key->rsa, (const BIGNUM**)&rsa_n, (const BIGNUM**)&rsa_e, NULL);
 	if ((r = sshbuf_get_u32(e->request, NULL)) != 0 || /* ignored */
-	    (r = sshbuf_get_bignum1(e->request, key->rsa->e)) != 0 ||
-	    (r = sshbuf_get_bignum1(e->request, key->rsa->n)) != 0 ||
+	    (r = sshbuf_get_bignum1(e->request, rsa_e)) != 0 ||
+	    (r = sshbuf_get_bignum1(e->request, rsa_n)) != 0 ||
 	    (r = sshbuf_get_bignum1(e->request, challenge)))
 		fatal("%s: buffer error: %s", __func__, ssh_err(r));
 
@@ -394,6 +442,7 @@ process_sign_request2(SocketEntry *e)
 	struct sshbuf *msg;
 	struct sshkey *key;
 	struct identity *id;
+	int kt = KEY_UNSPEC;
 
 	if ((msg = sshbuf_new()) == NULL)
 		fatal("%s: sshbuf_new failed", __func__);
@@ -415,6 +464,8 @@ process_sign_request2(SocketEntry *e)
 		verbose("%s: user refused key", __func__);
 		goto send;
 	}
+	kt = id->key->type;
+	id->key->type = key->type;
 	if ((r = sshkey_sign(id->key, &signature, &slen,
 	    data, dlen, agent_decode_alg(key, flags), compat)) != 0) {
 		error("%s: sshkey_sign: %s", __func__, ssh_err(r));
@@ -423,6 +474,8 @@ process_sign_request2(SocketEntry *e)
 	/* Success */
 	ok = 0;
  send:
+	if (kt != KEY_UNSPEC)
+		id->key->type = kt;
 	sshkey_free(key);
 	if (ok == 0) {
 		if ((r = sshbuf_put_u8(msg, SSH2_AGENT_SIGN_RESPONSE)) != 0 ||
@@ -450,6 +503,7 @@ process_remove_identity(SocketEntry *e, int version)
 	u_char *blob;
 #ifdef WITH_SSH1
 	u_int bits;
+	BIGNUM *rsa_n = NULL, *rsa_e = NULL;
 #endif /* WITH_SSH1 */
 
 	switch (version) {
@@ -459,9 +513,10 @@ process_remove_identity(SocketEntry *e, int version)
 			error("%s: sshkey_new failed", __func__);
 			return;
 		}
+		RSA_get0_key(key->rsa, (const BIGNUM**)&rsa_n, (const BIGNUM**)&rsa_e, NULL);
 		if ((r = sshbuf_get_u32(e->request, &bits)) != 0 ||
-		    (r = sshbuf_get_bignum1(e->request, key->rsa->e)) != 0 ||
-		    (r = sshbuf_get_bignum1(e->request, key->rsa->n)) != 0)
+		    (r = sshbuf_get_bignum1(e->request, rsa_e)) != 0 ||
+		    (r = sshbuf_get_bignum1(e->request, rsa_n)) != 0)
 			fatal("%s: buffer error: %s", __func__, ssh_err(r));
 
 		if (bits != sshkey_size(key))
@@ -565,19 +620,24 @@ agent_decode_rsa1(struct sshbuf *m, struct sshkey **kp)
 {
 	struct sshkey *k = NULL;
 	int r = SSH_ERR_INTERNAL_ERROR;
+	BIGNUM *n = NULL, *e = NULL, *d = NULL;
+	BIGNUM *iqmp = NULL, *p = NULL, *q = NULL;
 
 	*kp = NULL;
 	if ((k = sshkey_new_private(KEY_RSA1)) == NULL)
 		return SSH_ERR_ALLOC_FAIL;
 
+	RSA_get0_key(k->rsa, (const BIGNUM**)&n, (const BIGNUM**)&e, (const BIGNUM**)&d);
+	RSA_get0_crt_params(k->rsa, NULL, NULL, (const BIGNUM**)&iqmp);
+	RSA_get0_factors(k->rsa, (const BIGNUM**)&p, (const BIGNUM**)&q);
 	if ((r = sshbuf_get_u32(m, NULL)) != 0 ||		/* ignored */
-	    (r = sshbuf_get_bignum1(m, k->rsa->n)) != 0 ||
-	    (r = sshbuf_get_bignum1(m, k->rsa->e)) != 0 ||
-	    (r = sshbuf_get_bignum1(m, k->rsa->d)) != 0 ||
-	    (r = sshbuf_get_bignum1(m, k->rsa->iqmp)) != 0 ||
+	    (r = sshbuf_get_bignum1(m, n)) != 0 ||
+	    (r = sshbuf_get_bignum1(m, e)) != 0 ||
+	    (r = sshbuf_get_bignum1(m, d)) != 0 ||
+	    (r = sshbuf_get_bignum1(m, iqmp)) != 0 ||
 	    /* SSH1 and SSL have p and q swapped */
-	    (r = sshbuf_get_bignum1(m, k->rsa->q)) != 0 ||	/* p */
-	    (r = sshbuf_get_bignum1(m, k->rsa->p)) != 0) 	/* q */
+	    (r = sshbuf_get_bignum1(m, q)) != 0 ||	/* p */
+	    (r = sshbuf_get_bignum1(m, p)) != 0) 	/* q */
 		goto out;
 
 	/* Generate additional parameters */
@@ -745,7 +805,7 @@ no_identities(SocketEntry *e, u_int type)
 static void
 process_add_smartcard_key(SocketEntry *e)
 {
-	char *provider = NULL, *pin, canonical_provider[PATH_MAX];
+	char *provider = NULL, *pin, *xstore, canonical_provider[PATH_MAX];
 	int r, i, version, count = 0, success = 0, confirm = 0;
 	u_int seconds;
 	time_t death = 0;
@@ -755,7 +815,8 @@ process_add_smartcard_key(SocketEntry *e)
 	Idtab *tab;
 
 	if ((r = sshbuf_get_cstring(e->request, &provider, NULL)) != 0 ||
-	    (r = sshbuf_get_cstring(e->request, &pin, NULL)) != 0)
+	    (r = sshbuf_get_cstring(e->request, &pin, NULL)) != 0 ||
+	    (r = sshbuf_get_cstring(e->request, &xstore, NULL)) != 0)
 		fatal("%s: buffer error: %s", __func__, ssh_err(r));
 
 	while (sshbuf_len(e->request)) {
@@ -791,6 +852,16 @@ process_add_smartcard_key(SocketEntry *e)
 	if (lifetime && !death)
 		death = monotime() + lifetime;
 
+	if (xstore != NULL && xstore[0] != '\0') {
+		X509StoreOptions extra;
+
+		X509StoreOptions_init(&extra);
+		extra.certificate_file = xstore;
+		extra.revocation_file = xstrdup(""); /*ignore*/
+		ssh_x509store_addlocations(&extra);
+		X509StoreOptions_reset(&extra);
+	}
+
 	count = pkcs11_add_provider(canonical_provider, pin, &keys);
 	for (i = 0; i < count; i++) {
 		k = keys[i];
@@ -798,6 +869,7 @@ process_add_smartcard_key(SocketEntry *e)
 		tab = idtab_lookup(version);
 		if (lookup_identity(k, version) == NULL) {
 			id = xcalloc(1, sizeof(Identity));
+			x509key_build_chain(k);
 			id->key = k;
 			id->provider = xstrdup(canonical_provider);
 			id->comment = xstrdup(canonical_provider); /* XXX */
@@ -1225,9 +1297,17 @@ main(int ac, char **av)
 
 	platform_disable_tracing(0);	/* strict=no */
 
-#ifdef WITH_OPENSSL
-	OpenSSL_add_all_algorithms();
-#endif
+	ssh_OpenSSL_startup();
+	fill_default_xkalg();
+{
+	X509StoreOptions ca;
+
+	X509StoreOptions_init(&ca);
+	X509StoreOptions_system_defaults(&ca);
+	ssh_x509store_addlocations(&ca);
+	X509StoreOptions_reset(&ca);
+}
+	pssh_x509store_build_certchain = ssh_x509store_build_certchain;
 
 	__progname = ssh_get_progname(av[0]);
 	seed_rng();

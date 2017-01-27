@@ -31,7 +31,7 @@
 extern int use_privsep;
 #define PRIVSEP(x)	(use_privsep ? mm_##x : x)
 
-enum mm_keytype { MM_NOKEY, MM_HOSTKEY, MM_USERKEY };
+enum mm_keytype {MM_NOKEY, MM_HOSTKEY, MM_USERKEY, MM_RSAHOSTKEY, MM_RSAUSERKEY};
 
 struct monitor;
 struct mm_master;
@@ -49,7 +49,12 @@ int mm_key_allowed(enum mm_keytype, const char *, const char *, Key *, int);
 int mm_user_key_allowed(struct passwd *, Key *, int);
 int mm_hostbased_key_allowed(struct passwd *, const char *,
     const char *, Key *);
+int mm_auth_rhosts_rsa_key_allowed(struct passwd *, const char *,
+    const char *, Key *);
 int mm_key_verify(Key *, u_char *, u_int, u_char *, u_int);
+int mm_auth_rsa_key_allowed(struct passwd *, BIGNUM *, Key **);
+int mm_auth_rsa_verify_response(Key *, BIGNUM *, u_char *);
+BIGNUM *mm_auth_rsa_generate_challenge(Key *);
 
 #ifdef GSSAPI
 OM_uint32 mm_ssh_gssapi_server_ctx(Gssctxt **, gss_OID);
@@ -78,6 +83,10 @@ struct Session;
 void mm_terminate(void);
 int mm_pty_allocate(int *, int *, char *, size_t);
 void mm_session_pty_cleanup2(struct Session *);
+
+/* SSHv1 interfaces */
+void mm_ssh1_session_id(u_char *);
+int mm_ssh1_session_key(BIGNUM *);
 
 /* Key export functions */
 struct newkeys *mm_newkeys_from_blob(u_char *, int);

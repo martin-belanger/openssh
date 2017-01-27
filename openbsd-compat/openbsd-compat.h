@@ -179,20 +179,22 @@ int writev(int, struct iovec *, int);
 int getpeereid(int , uid_t *, gid_t *);
 #endif
 
-#ifdef HAVE_ARC4RANDOM
-# ifndef HAVE_ARC4RANDOM_STIR
-#  define arc4random_stir()
-# endif
-#else
+#ifndef HAVE_ARC4RANDOM
 unsigned int arc4random(void);
 void arc4random_stir(void);
-#endif /* !HAVE_ARC4RANDOM */
+#endif
 
 #ifndef HAVE_ARC4RANDOM_BUF
 void arc4random_buf(void *, size_t);
 #endif
 
 #ifndef HAVE_ARC4RANDOM_UNIFORM
+u_int32_t arc4random_uniform(u_int32_t);
+#endif
+
+#ifdef __ANDROID__
+/* defined but not declared */
+void arc4random_buf(void *, size_t);
 u_int32_t arc4random_uniform(u_int32_t);
 #endif
 
@@ -225,9 +227,12 @@ unsigned long long strtoull(const char *, char **, int);
 long long strtonum(const char *, long long, long long, const char **);
 #endif
 
+#if 0
+/* on Android function mblen is declared but not defined ! */
 /* multibyte character support */
 #ifndef HAVE_MBLEN
 # define mblen(x, y)	(1)
+#endif
 #endif
 
 #ifndef HAVE_WCWIDTH
@@ -307,6 +312,7 @@ char *shadow_pw(struct passwd *pw);
 #include "bsd-cygwin_util.h"
 
 #include "port-aix.h"
+#include "port-android.h"
 #include "port-irix.h"
 #include "port-linux.h"
 #include "port-solaris.h"

@@ -1,4 +1,4 @@
-/* $OpenBSD: channels.c,v 1.356 2016/10/18 17:32:54 dtucker Exp $ */
+/* $OpenBSD: channels.c,v 1.355 2016/09/30 20:24:46 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -2265,7 +2265,7 @@ channel_prepare_select(fd_set **readsetp, fd_set **writesetp, int *maxfdp,
 	n = MAXIMUM(*maxfdp, channel_max_fd);
 
 	nfdset = howmany(n+1, NFDBITS);
-	/* Explicitly test here, because xrealloc isn't always called */
+	/* Explicitly test here, because xreallocarray isn't always called */
 	if (nfdset && SIZE_MAX / nfdset < sizeof(fd_mask))
 		fatal("channel_prepare_select: max_fd (%d) is too large", n);
 	sz = nfdset * sizeof(fd_mask);
@@ -3803,6 +3803,45 @@ channel_request_rforward_cancel(struct Forward *fwd)
 		return (channel_request_rforward_cancel_tcpip(fwd->listen_host,
 		    fwd->listen_port ? fwd->listen_port : fwd->allocated_port));
 	}
+}
+
+/*
+ * This is called after receiving CHANNEL_FORWARDING_REQUEST.  This initates
+ * listening for the port, and sends back a success reply (or disconnect
+ * message if there was an error).
+ */
+int
+channel_input_port_forward_request(int is_root, struct ForwardOptions *fwd_opts)
+{
+	int success = 0;
+	struct Forward fwd;
+
+	/* Get arguments from the packet. */
+	memset(&fwd, 0, sizeof(fwd));
+	fwd.listen_port = packet_get_int();
+	fwd.connect_host = packet_get_string(NULL);
+	fwd.connect_port = packet_get_int();
+
+#ifndef HAVE_CYGWIN
+	/*
+	 * Check that an unprivileged user is not trying to forward a
+	 * privileged port.
+	 */
+	if (fwd.listen_port < IPPORT_RESERVED && !is_root)
+		packet_disconnect(
+		    "Requested forwarding of port %d but user is not root.",
+		    fwd.listen_port);
+	if (fwd.connect_port == 0)
+		packet_disconnect("Dynamic forwarding denied.");
+#endif
+
+	/* Initiate forwarding */
+	success = channel_setup_local_fwd_listener(&fwd, fwd_opts);
+
+	/* Free the argument string. */
+	free(fwd.connect_host);
+
+	return (success ? 0 : -1);
 }
 
 /*

@@ -25,6 +25,7 @@ explicit_bzero(void *p, size_t n)
 
 #else /* HAVE_MEMSET_S */
 
+#if 0
 /*
  * Indirect bzero through a volatile pointer to hopefully avoid
  * dead-store optimisation eliminating the call.
@@ -47,6 +48,22 @@ explicit_bzero(void *p, size_t n)
 
 	ssh_bzero(p, n);
 }
+#else
+/*
+ * Android does not define bzero and declare a macro that
+ * use builtin.
+ * Note that SSH build disable builtin functions!
+ * Function memset is more portable!
+ */
+typedef void *(*memset_t)(void *,int,size_t);
+static volatile memset_t ssh_memset = memset;
+
+void
+explicit_bzero(void *p, size_t n)
+{
+	ssh_memset(p, 0, n);
+}
+#endif
 
 #endif /* HAVE_MEMSET_S */
 
