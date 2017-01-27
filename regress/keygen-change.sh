@@ -6,7 +6,7 @@ tid="change passphrase for key"
 S1="secret1"
 S2="2secret"
 
-KEYTYPES=`${SSH} -Q key-plain`
+KEYTYPES=`${SSH} -Q key-plain | grep -v "^x509v3-"`
 if ssh_version 1; then
 	KEYTYPES="${KEYTYPES} rsa1"
 fi

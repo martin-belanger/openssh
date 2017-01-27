@@ -109,9 +109,14 @@ pid_t getpgid(pid_t);
 #endif
 
 #ifndef HAVE_ENDGRENT
+#ifdef __ANDROID__
+/* endgrent is declared but not defined, see port-android.c */
+#else
 # define endgrent() do { } while(0)
 #endif
+#endif
 
+#ifdef KRB5
 #ifndef HAVE_KRB5_GET_ERROR_MESSAGE
 # define krb5_get_error_message krb5_get_err_text
 #endif
@@ -119,6 +124,7 @@ pid_t getpgid(pid_t);
 #ifndef HAVE_KRB5_FREE_ERROR_MESSAGE
 # define krb5_free_error_message(a,b) do { } while(0)
 #endif
+#endif /*def KRB5*/
 
 #ifndef HAVE_PLEDGE
 int pledge(const char *promises, const char *paths[]);

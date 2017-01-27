@@ -10,6 +10,29 @@
  * software must be clearly marked as such, and if the derived work is
  * incompatible with the protocol description in the RFC file, it must be
  * called by a name other than "ssh" or "Secure Shell".
+ *
+ * X.509 certificates support,
+ * Copyright (c) 2002 Roumen Petrov.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #define ETCDIR				"/etc"
@@ -85,6 +108,14 @@
  * volume where root is mapped to nobody, this may need to be world-readable.
  */
 #define _PATH_SSH_USER_CONFFILE		_PATH_SSH_USER_DIR "/config"
+
+#ifdef USE_OPENSSL_ENGINE
+/*
+ * Engine configuration file in user's home directory. Same rules as
+ * for user config file.
+ */
+#define _PATH_SSH_ENGINE_CONFFILE	".ssh/engine"
+#endif
 
 /*
  * File containing a list of those rsa keys that permit logging in as this
@@ -166,7 +197,33 @@
 #define _PATH_LS			"ls"
 #endif
 
+/* path to login program */
+#ifndef LOGIN_PROGRAM
+# ifdef LOGIN_PROGRAM_FALLBACK
+#  define LOGIN_PROGRAM         LOGIN_PROGRAM_FALLBACK
+# else
+#  define LOGIN_PROGRAM         "/usr/bin/login"
+# endif
+#endif /* LOGIN_PROGRAM */
+
 /* Askpass program define */
 #ifndef ASKPASS_PROGRAM
 #define ASKPASS_PROGRAM         "/usr/lib/ssh/ssh-askpass"
 #endif /* ASKPASS_PROGRAM */
+
+
+#ifndef SSHCADIR
+#define SSHCADIR			SSHDIR "/ca"
+#endif
+
+/* x509 user store */
+#define _PATH_USERCA_CERTIFICATE_FILE	"~/" _PATH_SSH_USER_DIR "/ca-bundle.crt"
+#define _PATH_USERCA_CERTIFICATE_PATH	"~/" _PATH_SSH_USER_DIR "/crt"
+#define _PATH_USERCA_REVOCATION_FILE	"~/" _PATH_SSH_USER_DIR "/ca-bundle.crl"
+#define _PATH_USERCA_REVOCATION_PATH	"~/" _PATH_SSH_USER_DIR "/crl"
+
+/* x509 system store */
+#define _PATH_CA_CERTIFICATE_FILE	SSHCADIR "/ca-bundle.crt"
+#define _PATH_CA_CERTIFICATE_PATH	SSHCADIR "/crt"
+#define _PATH_CA_REVOCATION_FILE	SSHCADIR "/ca-bundle.crl"
+#define _PATH_CA_REVOCATION_PATH	SSHCADIR "/crl"

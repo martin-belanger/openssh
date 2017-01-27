@@ -84,6 +84,10 @@ LTESTS= 	connect \
 
 #		dhgex \
 
+FIPS_TESTS=\
+	fips-connect-privsep \
+	fips-try-ciphers
+
 INTEROP_TESTS=	putty-transfer putty-ciphers putty-kex conch-ciphers
 #INTEROP_TESTS+=ssh-com ssh-com-client ssh-com-keygen ssh-com-sftp
 
@@ -120,6 +124,8 @@ SUDO_CLEAN+=	/var/run/testdata_${USERNAME} /var/run/keycommand_${USERNAME}
 TEST_ENV=      "MALLOC_OPTIONS=CFGJRSUX"
 
 TEST_SSH_SSHKEYGEN?=ssh-keygen
+TEST_SHELL?=sh
+SHELL=$(TEST_SHELL)
 
 CPPFLAGS=-I..
 
@@ -140,6 +146,7 @@ t3:
 	${TEST_SSH_SSHKEYGEN} -if $(OBJ)/t3.out | diff - ${.CURDIR}/rsa_openssh.pub
 
 t4:
+	OPENSSL_FIPS=; unset OPENSSL_FIPS || :; \
 	${TEST_SSH_SSHKEYGEN} -E md5 -lf ${.CURDIR}/rsa_openssh.pub |\
 		awk '{print $$2}' | diff - ${.CURDIR}/t4.ok
 
@@ -186,8 +193,10 @@ t10: $(OBJ)/t10.out
 	${TEST_SSH_SSHKEYGEN} -Bf $(OBJ)/t10.out > /dev/null
 
 t11:
+	if egrep "^#define.*HAVE_EVP_SHA256" ${BUILDDIR}/config.h >/dev/null 2>&1 ; then \
 	${TEST_SSH_SSHKEYGEN} -E sha256 -lf ${.CURDIR}/rsa_openssh.pub |\
-		awk '{print $$2}' | diff - ${.CURDIR}/t11.ok
+		awk '{print $$2}' | diff - ${.CURDIR}/t11.ok \
+	; fi
 
 $(OBJ)/t12.out:
 	${TEST_SSH_SSHKEYGEN} -q -t ed25519 -N '' -C 'test-comment-1234' -f $@
@@ -198,14 +207,21 @@ t12: $(OBJ)/t12.out
 t-exec:	${LTESTS:=.sh}
 	@if [ "x$?" = "x" ]; then exit 0; fi; \
 	for TEST in ""$?; do \
-		echo "run test $${TEST}" ... 1>&2; \
+		echo "=== run test $$TEST" ... >&2; \
+		(env SUDO="${SUDO}" TEST_ENV=${TEST_ENV} ${TEST_SHELL} ${.CURDIR}/test-exec.sh ${.OBJDIR} ${.CURDIR}/$${TEST}) || exit $$?; \
+	done
+
+f-exec:	${FIPS_LTESTS:=.sh}
+	@if [ "x$?" = "x" ]; then exit 0; fi; \
+	for TEST in ""$?; do \
+		echo "=== run test $$TEST" ... >&2; \
 		(env SUDO="${SUDO}" TEST_ENV=${TEST_ENV} ${TEST_SHELL} ${.CURDIR}/test-exec.sh ${.OBJDIR} ${.CURDIR}/$${TEST}) || exit $$?; \
 	done
 
 t-exec-interop:	${INTEROP_TESTS:=.sh}
 	@if [ "x$?" = "x" ]; then exit 0; fi; \
 	for TEST in ""$?; do \
-		echo "run test $${TEST}" ... 1>&2; \
+		echo "=== run test $$TEST" ... >&2; \
 		(env SUDO="${SUDO}" TEST_ENV=${TEST_ENV} ${TEST_SHELL} ${.CURDIR}/test-exec.sh ${.OBJDIR} ${.CURDIR}/$${TEST}) || exit $$?; \
 	done
 

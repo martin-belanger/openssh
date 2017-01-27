@@ -1,6 +1,8 @@
 /* $OpenBSD: kex.c,v 1.127 2016/10/10 19:28:48 markus Exp $ */
 /*
  * Copyright (c) 2000, 2001 Markus Friedl.  All rights reserved.
+ * X.509 certificates support,
+ * Copyright (c) 2014 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -37,6 +39,7 @@
 #include <openssl/dh.h>
 #endif
 
+#include "xmalloc.h"
 #include "ssh2.h"
 #include "packet.h"
 #include "compat.h"
@@ -89,9 +92,11 @@ static const struct kexalg kexalgs[] = {
 #ifdef WITH_OPENSSL
 	{ KEX_DH1, KEX_DH_GRP1_SHA1, 0, SSH_DIGEST_SHA1 },
 	{ KEX_DH14_SHA1, KEX_DH_GRP14_SHA1, 0, SSH_DIGEST_SHA1 },
+#ifdef HAVE_EVP_SHA256
 	{ KEX_DH14_SHA256, KEX_DH_GRP14_SHA256, 0, SSH_DIGEST_SHA256 },
 	{ KEX_DH16_SHA512, KEX_DH_GRP16_SHA512, 0, SSH_DIGEST_SHA512 },
 	{ KEX_DH18_SHA512, KEX_DH_GRP18_SHA512, 0, SSH_DIGEST_SHA512 },
+#endif /* HAVE_EVP_SHA256 */
 	{ KEX_DHGEX_SHA1, KEX_DH_GEX_SHA1, 0, SSH_DIGEST_SHA1 },
 #ifdef HAVE_EVP_SHA256
 	{ KEX_DHGEX_SHA256, KEX_DH_GEX_SHA256, 0, SSH_DIGEST_SHA256 },
@@ -345,12 +350,18 @@ kex_send_ext_info(struct ssh *ssh)
 
 	if ((algs = sshkey_alg_list(0, 1, ',')) == NULL)
 		return SSH_ERR_ALLOC_FAIL;
+#ifdef EXPERIMENTAL_RSA_SHA2_256
+/* IMPORTANT NOTE:
+ * Do not offer rsa-sha2-* until is resolved misconfiguration issue
+ * with allowed public key algorithms!
+ */
 	if ((r = sshpkt_start(ssh, SSH2_MSG_EXT_INFO)) != 0 ||
 	    (r = sshpkt_put_u32(ssh, 1)) != 0 ||
 	    (r = sshpkt_put_cstring(ssh, "server-sig-algs")) != 0 ||
 	    (r = sshpkt_put_cstring(ssh, algs)) != 0 ||
 	    (r = sshpkt_send(ssh)) != 0)
 		goto out;
+#endif
 	/* success */
 	r = 0;
  out:
@@ -432,6 +443,10 @@ kex_input_newkeys(int type, u_int32_t seq, void *ctxt)
 	sshbuf_reset(kex->peer);
 	/* sshbuf_reset(kex->my); */
 	kex->flags &= ~KEX_INIT_SENT;
+
+	free(kex->hostkey_alg);
+	kex->hostkey_alg = NULL;
+
 	free(kex->name);
 	kex->name = NULL;
 	return 0;
@@ -723,10 +738,8 @@ choose_hostkeyalg(struct kex *k, char *client, char *server)
 	    k->hostkey_alg ? k->hostkey_alg : "(no match)");
 	if (k->hostkey_alg == NULL)
 		return SSH_ERR_NO_HOSTKEY_ALG_MATCH;
-	k->hostkey_type = sshkey_type_from_name(k->hostkey_alg);
-	if (k->hostkey_type == KEY_UNSPEC)
+	if (sshkey_type_from_name(k->hostkey_alg) == KEY_UNSPEC)
 		return SSH_ERR_INTERNAL_ERROR;
-	k->hostkey_nid = sshkey_ecdsa_nid_from_name(k->hostkey_alg);
 	return 0;
 }
 
@@ -855,13 +868,13 @@ kex_choose_conf(struct ssh *ssh)
 	/* XXX need runden? */
 	kex->we_need = need;
 	kex->dh_need = dh_need;
+	r = 0;
 
+ out:
 	/* ignore the next message if the proposals do not match */
 	if (first_kex_follows && !proposals_match(my, peer) &&
 	    !(ssh->compat & SSH_BUG_FIRSTKEX))
 		ssh->dispatch_skip_packets = 1;
-	r = 0;
- out:
 	kex_prop_free(my);
 	kex_prop_free(peer);
 	return r;
@@ -975,9 +988,37 @@ kex_derive_keys_bn(struct ssh *ssh, u_char *hash, u_int hashlen,
 }
 #endif
 
+int
+kex_load_host_keys(struct kex *kex, struct ssh *ssh, struct sshkey **hostpub, struct sshkey **hostpriv) {
+	int r;
+
+	if (hostpub == NULL || hostpriv == NULL) {
+		r = SSH_ERR_INVALID_ARGUMENT;
+		goto done;
+	}
+
+	if (kex->find_host_public_key == NULL ||
+	    kex->find_host_private_key == NULL) {
+		r = SSH_ERR_INVALID_ARGUMENT;
+		goto done;
+	}
+
+	*hostpub = kex->find_host_public_key(kex->hostkey_alg, ssh);
+	*hostpriv = kex->find_host_private_key(kex->hostkey_alg, ssh);
+
+	/* Only public part is required, private is optional and
+	 * caller is responsible to check private part
+	 */
+	r = (*hostpub != NULL)
+		? SSH_ERR_SUCCESS
+		: SSH_ERR_NO_HOSTKEY_LOADED;
+done:
+	return r;
+}
+
 #ifdef WITH_SSH1
 int
-derive_ssh1_session_id(BIGNUM *host_modulus, BIGNUM *server_modulus,
+derive_ssh1_session_id(const BIGNUM *host_modulus, const BIGNUM *server_modulus,
     u_int8_t cookie[8], u_int8_t id[16])
 {
 	u_int8_t hbuf[2048], sbuf[2048], obuf[SSH_DIGEST_MAX_LENGTH];

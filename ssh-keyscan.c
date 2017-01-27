@@ -5,6 +5,29 @@
  * Modification and redistribution in source and binary forms is
  * permitted provided that due credit is given to the author and the
  * OpenBSD project by leaving this copyright notice intact.
+ *
+ * X.509 certificates support,
+ * Copyright (c) 2002-2014 Roumen Petrov.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "includes.h"
@@ -20,6 +43,7 @@
 #include <arpa/inet.h>
 
 #include <openssl/bn.h>
+#include "evp-compat.h"
 
 #include <netdb.h>
 #include <errno.h>
@@ -35,6 +59,8 @@
 #include "ssh1.h"
 #include "sshbuf.h"
 #include "sshkey.h"
+#include "ssh-x509.h"
+#include "ssh-xkalg.h"
 #include "cipher.h"
 #include "kex.h"
 #include "compat.h"
@@ -54,14 +80,7 @@ int IPv4or6 = AF_UNSPEC;
 
 int ssh_port = SSH_DEFAULT_PORT;
 
-#define KT_RSA1		1
-#define KT_DSA		2
-#define KT_RSA		4
-#define KT_ECDSA	8
-#define KT_ED25519	16
-
-int get_cert = 0;
-int get_keytypes = KT_RSA|KT_ECDSA|KT_ED25519;
+char* get_keynames = NULL;
 
 int hash_hosts = 0;		/* Hash hostname on output */
 
@@ -94,7 +113,7 @@ typedef struct Connection {
 	int c_plen;		/* Packet length field for ssh packet */
 	int c_len;		/* Total bytes which must be read. */
 	int c_off;		/* Length of data read so far. */
-	int c_keytype;		/* Only one of KT_RSA1, KT_DSA, or KT_RSA */
+	const char *c_keyname;
 	sig_atomic_t c_done;	/* SSH2 done */
 	char *c_namebase;	/* Address to free for c_name and c_namelist */
 	char *c_name;		/* Hostname of connection for errors */
@@ -177,7 +196,7 @@ xstrsep(char **str, const char *delim)
  * null token for two adjacent separators, so we may have to loop.
  */
 static char *
-strnnsep(char **stringp, char *delim)
+strnnsep(char **stringp, const char *delim)
 {
 	char *tok;
 
@@ -195,6 +214,7 @@ keygrab_ssh1(con *c)
 	static struct sshbuf *msg;
 	int r;
 	u_char type;
+	BIGNUM *n = NULL, *e = NULL;
 
 	if (rsa == NULL) {
 		if ((rsa = sshkey_new(KEY_RSA1)) == NULL) {
@@ -213,6 +233,7 @@ keygrab_ssh1(con *c)
 		sshbuf_reset(msg);
 		return NULL;
 	}
+	RSA_get0_key(rsa->rsa, (const BIGNUM**)&n, (const BIGNUM**)&e, NULL);
 	if ((r = sshbuf_consume(msg, 8)) != 0 || /* cookie */
 	    /* server key */
 	    (r = sshbuf_get_u32(msg, NULL)) != 0 ||
@@ -220,8 +241,8 @@ keygrab_ssh1(con *c)
 	    (r = sshbuf_get_bignum1(msg, NULL)) != 0 ||
 	    /* host key */
 	    (r = sshbuf_get_u32(msg, NULL)) != 0 ||
-	    (r = sshbuf_get_bignum1(msg, rsa->rsa->e)) != 0 ||
-	    (r = sshbuf_get_bignum1(msg, rsa->rsa->n)) != 0) {
+	    (r = sshbuf_get_bignum1(msg, e)) != 0 ||
+	    (r = sshbuf_get_bignum1(msg, n)) != 0) {
  buf_err:
 		error("%s: buffer error: %s", __func__, ssh_err(r));
 		sshbuf_reset(msg);
@@ -268,32 +289,7 @@ keygrab_ssh2(con *c)
 	int r;
 
 	enable_compat20();
-	switch (c->c_keytype) {
-	case KT_DSA:
-		myproposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = get_cert ?
-		    "ssh-dss-cert-v01@openssh.com" : "ssh-dss";
-		break;
-	case KT_RSA:
-		myproposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = get_cert ?
-		    "ssh-rsa-cert-v01@openssh.com" : "ssh-rsa";
-		break;
-	case KT_ED25519:
-		myproposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = get_cert ?
-		    "ssh-ed25519-cert-v01@openssh.com" : "ssh-ed25519";
-		break;
-	case KT_ECDSA:
-		myproposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = get_cert ?
-		    "ecdsa-sha2-nistp256-cert-v01@openssh.com,"
-		    "ecdsa-sha2-nistp384-cert-v01@openssh.com,"
-		    "ecdsa-sha2-nistp521-cert-v01@openssh.com" :
-		    "ecdsa-sha2-nistp256,"
-		    "ecdsa-sha2-nistp384,"
-		    "ecdsa-sha2-nistp521";
-		break;
-	default:
-		fatal("unknown key type %d", c->c_keytype);
-		break;
-	}
+	myproposal[PROPOSAL_SERVER_HOST_KEY_ALGS] = (char*)c->c_keyname;
 	if ((r = kex_setup(c->c_ssh, myproposal)) != 0) {
 		free(c->c_ssh);
 		fprintf(stderr, "kex_setup: %s\n", ssh_err(r));
@@ -321,7 +317,7 @@ keygrab_ssh2(con *c)
 }
 
 static void
-keyprint_one(char *host, struct sshkey *key)
+keyprint_one(char *host, con *c, struct sshkey *key)
 {
 	char *hostport;
 
@@ -329,9 +325,17 @@ keyprint_one(char *host, struct sshkey *key)
 		fatal("host_hash failed");
 
 	hostport = put_host_port(host, ssh_port);
-	if (!get_cert)
-		fprintf(stdout, "%s ", hostport);
+	fprintf(stdout, "%s ", hostport);
+#ifndef SSH_X509STORE_DISABLED
+	if (key_is_x509(key)) {
+		/* key_write will print x509 certificate in blob format :-( */
+		x509key_write_subject2(key, c->c_keyname, stdout);
+	} else {
+#endif /*ndef SSH_X509STORE_DISABLED*/
 	sshkey_write(key, stdout);
+#ifndef SSH_X509STORE_DISABLED
+	}
+#endif /*ndef SSH_X509STORE_DISABLED*/
 	fputs("\n", stdout);
 	free(hostport);
 }
@@ -344,13 +348,13 @@ keyprint(con *c, struct sshkey *key)
 
 	if (key == NULL)
 		return;
-	if (get_cert || (!hash_hosts && ssh_port == SSH_DEFAULT_PORT)) {
-		keyprint_one(hosts, key);
+	if (!hash_hosts && ssh_port == SSH_DEFAULT_PORT) {
+		keyprint_one(hosts, c, key);
 		return;
 	}
 	ohosts = hosts = xstrdup(hosts);
 	while ((host = strsep(&hosts, ",")) != NULL)
-		keyprint_one(host, key);
+		keyprint_one(host, c, key);
 	free(ohosts);
 }
 
@@ -390,10 +394,15 @@ tcpconnect(char *host)
 }
 
 static int
-conalloc(char *iname, char *oname, int keytype)
+conalloc(char *iname, char *oname, const char *keyname)
 {
 	char *namebase, *name, *namelist;
 	int s;
+	int k_type;
+
+	k_type = key_type_from_name((char*)keyname);
+	if (k_type == KEY_UNSPEC)
+		return (-1);
 
 	namebase = namelist = xstrdup(iname);
 
@@ -410,7 +419,7 @@ conalloc(char *iname, char *oname, int keytype)
 	if (fdcon[s].c_status)
 		fatal("conalloc: attempt to reuse fdno %d", s);
 
-	debug3("%s: oname %s kt %d", __func__, oname, keytype);
+	debug3("%s: oname %s keyname %s", __func__, oname, keyname);
 	fdcon[s].c_fd = s;
 	fdcon[s].c_status = CS_CON;
 	fdcon[s].c_namebase = namebase;
@@ -420,7 +429,13 @@ conalloc(char *iname, char *oname, int keytype)
 	fdcon[s].c_data = (char *) &fdcon[s].c_plen;
 	fdcon[s].c_len = 4;
 	fdcon[s].c_off = 0;
-	fdcon[s].c_keytype = keytype;
+{
+	Key *k = key_new(k_type);
+	if (key_type_plain(k->type) == KEY_ECDSA)
+		k->ecdsa_nid = key_ecdsa_nid_from_name((char*)keyname);
+	fdcon[s].c_keyname = key_ssh_name(k);
+	key_free(k);
+}
 	gettimeofday(&fdcon[s].c_tv, NULL);
 	fdcon[s].c_tv.tv_sec += timeout;
 	TAILQ_INSERT_TAIL(&tq, &fdcon[s], c_link);
@@ -440,7 +455,7 @@ confree(int s)
 	if (fdcon[s].c_status == CS_KEYS)
 		free(fdcon[s].c_data);
 	fdcon[s].c_status = CS_UNUSED;
-	fdcon[s].c_keytype = 0;
+	fdcon[s].c_keyname = NULL;
 	if (fdcon[s].c_ssh) {
 		ssh_packet_close(fdcon[s].c_ssh);
 		free(fdcon[s].c_ssh);
@@ -466,7 +481,7 @@ conrecycle(int s)
 	con *c = &fdcon[s];
 	int ret;
 
-	ret = conalloc(c->c_namelist, c->c_output_name, c->c_keytype);
+	ret = conalloc(c->c_namelist, c->c_output_name, c->c_keyname);
 	confree(s);
 	return (ret);
 }
@@ -479,6 +494,7 @@ congreet(int s)
 	char remote_version[sizeof buf];
 	size_t bufsiz;
 	con *c = &fdcon[s];
+	int rsa1key;
 
 	for (;;) {
 		memset(buf, '\0', sizeof(buf));
@@ -522,7 +538,8 @@ congreet(int s)
 		c->c_ssh->compat = compat_datafellows(remote_version);
 	else
 		c->c_ssh->compat = 0;
-	if (c->c_keytype != KT_RSA1) {
+	rsa1key = (strcmp(c->c_keyname, "rsa1") == 0);
+	if (!rsa1key) {
 		if (!ssh2_capable(remote_major, remote_minor)) {
 			debug("%s doesn't support ssh2", c->c_name);
 			confree(s);
@@ -533,10 +550,10 @@ congreet(int s)
 		confree(s);
 		return;
 	}
-	fprintf(stderr, "# %s:%d %s\n", c->c_name, ssh_port, chop(buf));
+	fprintf(stderr, "# %s:%d (%s) %s\n", c->c_name, ssh_port, fdcon[s].c_keyname, chop(buf));
 	n = snprintf(buf, sizeof buf, "SSH-%d.%d-OpenSSH-keyscan\r\n",
-	    c->c_keytype == KT_RSA1? PROTOCOL_MAJOR_1 : PROTOCOL_MAJOR_2,
-	    c->c_keytype == KT_RSA1? PROTOCOL_MINOR_1 : PROTOCOL_MINOR_2);
+	    rsa1key ? PROTOCOL_MAJOR_1 : PROTOCOL_MAJOR_2,
+	    rsa1key ? PROTOCOL_MINOR_1 : PROTOCOL_MINOR_2);
 	if (n < 0 || (size_t)n >= sizeof(buf)) {
 		error("snprintf: buffer too small");
 		confree(s);
@@ -547,7 +564,7 @@ congreet(int s)
 		confree(s);
 		return;
 	}
-	if (c->c_keytype != KT_RSA1) {
+	if (!rsa1key) {
 		keygrab_ssh2(c);
 		confree(s);
 		return;
@@ -653,16 +670,18 @@ static void
 do_host(char *host)
 {
 	char *name = strnnsep(&host, " \t\n");
-	int j;
+	const char *keyname;
 
 	if (name == NULL)
 		return;
-	for (j = KT_RSA1; j <= KT_ED25519; j *= 2) {
-		if (get_keytypes & j) {
-			while (ncon >= MAXCON)
-				conloop();
-			conalloc(name, *host ? host : name, j);
-		}
+	for (
+	    keyname = strtok(get_keynames, ",");
+	    keyname != NULL;
+	    keyname = strtok(NULL, ",")
+	) {
+		while (ncon >= MAXCON)
+			conloop();
+		conalloc(name, *host ? host : name, keyname);
 	}
 }
 
@@ -710,13 +729,25 @@ main(int argc, char **argv)
 	if (argc <= 1)
 		usage();
 
-	while ((opt = getopt(argc, argv, "cHv46p:T:t:f:")) != -1) {
+	fill_default_xkalg();
+	get_keynames = xstrdup(
+		 /* list all protocol v2 keys by default */
+		"x509v3-ecdsa-sha2-nistp256," /*RFC6187 ecdsa*/
+		"x509v3-ecdsa-sha2-nistp384," /*RFC6187 ecdsa*/
+		"x509v3-ecdsa-sha2-nistp521," /*RFC6187 ecdsa*/
+		"x509v3-sign-rsa,"
+		"x509v3-sign-dss,"
+		"ecdsa-sha2-nistp256,"
+		"ecdsa-sha2-nistp384,"
+		"ecdsa-sha2-nistp521,"
+		"ssh-ed25519,"
+		"ssh-rsa,"
+		"ssh-dss"
+	);
+	while ((opt = getopt(argc, argv, "Hv46p:T:t:f:")) != -1) {
 		switch (opt) {
 		case 'H':
 			hash_hosts = 1;
-			break;
-		case 'c':
-			get_cert = 1;
 			break;
 		case 'p':
 			ssh_port = a2port(optarg);
@@ -748,29 +779,12 @@ main(int argc, char **argv)
 			argv[fopt_count++] = optarg;
 			break;
 		case 't':
-			get_keytypes = 0;
+			get_keynames = xstrdup(optarg);
 			tname = strtok(optarg, ",");
 			while (tname) {
 				int type = sshkey_type_from_name(tname);
-				switch (type) {
-				case KEY_RSA1:
-					get_keytypes |= KT_RSA1;
-					break;
-				case KEY_DSA:
-					get_keytypes |= KT_DSA;
-					break;
-				case KEY_ECDSA:
-					get_keytypes |= KT_ECDSA;
-					break;
-				case KEY_RSA:
-					get_keytypes |= KT_RSA;
-					break;
-				case KEY_ED25519:
-					get_keytypes |= KT_ED25519;
-					break;
-				case KEY_UNSPEC:
+				if (type == KEY_UNSPEC)
 					fatal("unknown key type %s", tname);
-				}
 				tname = strtok(NULL, ",");
 			}
 			break;

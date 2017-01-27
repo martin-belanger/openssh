@@ -1,6 +1,7 @@
 /* $OpenBSD: mac.h,v 1.10 2016/07/08 03:44:42 djm Exp $ */
 /*
  * Copyright (c) 2001 Markus Friedl.  All rights reserved.
+ * Copyright (c) 2011 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -49,5 +50,9 @@ int	 mac_compute(struct sshmac *, u_int32_t, const u_char *, int,
 int	 mac_check(struct sshmac *, u_int32_t, const u_char *, size_t,
     const u_char *, size_t);
 void	 mac_clear(struct sshmac *);
+
+#ifdef OPENSSL_FIPS
+extern char*	only_fips_valid_macs(const char*);
+#endif
 
 #endif /* SSHMAC_H */

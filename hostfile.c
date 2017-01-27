@@ -14,6 +14,8 @@
  *
  * Copyright (c) 1999, 2000 Markus Friedl.  All rights reserved.
  * Copyright (c) 1999 Niels Provos.  All rights reserved.
+ * X.509 certificates support,
+ * Copyright (c) 2002-2003,2012 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -61,6 +63,7 @@
 #include "ssherr.h"
 #include "digest.h"
 #include "hmac.h"
+#include "ssh-x509.h"
 
 struct hostkeys {
 	struct hostkey_entry *entries;
@@ -178,8 +181,15 @@ hostfile_read_key(char **cpp, u_int *bitsp, struct sshkey *ret)
 
 	/* Return results. */
 	*cpp = cp;
-	if (bitsp != NULL)
-		*bitsp = sshkey_size(ret);
+	if (bitsp != NULL) {
+		if ((*bitsp = sshkey_size(ret)) <= 0) {
+			/* Note key may contain only X.509 distinguished name.
+			 * Return 1 in this case. */
+			if (sshkey_is_x509(ret))
+				return 1;
+			return 0;
+		}
+	}
 	return 1;
 }
 
@@ -323,6 +333,18 @@ check_key_not_revoked(struct hostkeys *hostkeys, struct sshkey *k)
 	return 0;
 }
 
+static int/*bool*/
+hostkey_match(const struct sshkey *key, const struct sshkey *found) {
+	if (sshkey_is_x509(key)) {
+		/* compare X.509 keys by distiguished name
+		 * if "X.509 store" is enabled otherwise
+		 * compare public parts
+		 */
+		return(sshkey_equal_public(key, found));
+	}
+	return(sshkey_equal(key, found));
+}
+
 /*
  * Match keys against a specified key, or look one up by key type.
  *
@@ -339,8 +361,8 @@ check_key_not_revoked(struct hostkeys *hostkeys, struct sshkey *k)
  * Finally, check any found key is not revoked.
  */
 static HostStatus
-check_hostkeys_by_key_or_type(struct hostkeys *hostkeys,
-    struct sshkey *k, int keytype, const struct hostkey_entry **found)
+check_hostkeys_by_key_or_types(struct hostkeys *hostkeys,
+    struct sshkey *k, int keytype, int subtype, const struct hostkey_entry **found)
 {
 	u_int i;
 	HostStatus end_return = HOST_NEW;
@@ -348,6 +370,7 @@ check_hostkeys_by_key_or_type(struct hostkeys *hostkeys,
 	HostkeyMarker want_marker = want_cert ? MRK_CA : MRK_NONE;
 	int proto = (k ? k->type : keytype) == KEY_RSA1 ? 1 : 2;
 
+	if (k)	subtype = k->ecdsa_nid;
 	if (found != NULL)
 		*found = NULL;
 
@@ -359,7 +382,10 @@ check_hostkeys_by_key_or_type(struct hostkeys *hostkeys,
 		if (hostkeys->entries[i].marker != want_marker)
 			continue;
 		if (k == NULL) {
-			if (hostkeys->entries[i].key->type != keytype)
+			if (X509KEY_BASETYPE(hostkeys->entries[i].key) != keytype)
+				continue;
+			/* NOTE ecdsa_nid is -1 for non ECC keys */
+			if (subtype != -1 && subtype != hostkeys->entries[i].key->ecdsa_nid)
 				continue;
 			end_return = HOST_FOUND;
 			if (found != NULL)
@@ -377,7 +403,7 @@ check_hostkeys_by_key_or_type(struct hostkeys *hostkeys,
 				break;
 			}
 		} else {
-			if (sshkey_equal(k, hostkeys->entries[i].key)) {
+			if (hostkey_match(k, hostkeys->entries[i].key)) {
 				end_return = HOST_OK;
 				if (found != NULL)
 					*found = hostkeys->entries + i;
@@ -403,14 +429,14 @@ check_key_in_hostkeys(struct hostkeys *hostkeys, struct sshkey *key,
 {
 	if (key == NULL)
 		fatal("no key to look up");
-	return check_hostkeys_by_key_or_type(hostkeys, key, 0, found);
+	return check_hostkeys_by_key_or_types(hostkeys, key, 0, -1, found);
 }
 
 int
-lookup_key_in_hostkeys_by_type(struct hostkeys *hostkeys, int keytype,
+lookup_key_in_hostkeys_by_types(struct hostkeys *hostkeys, int keytype, int subtype,
     const struct hostkey_entry **found)
 {
-	return (check_hostkeys_by_key_or_type(hostkeys, NULL, keytype,
+	return (check_hostkeys_by_key_or_types(hostkeys, NULL, keytype, subtype,
 	    found) == HOST_FOUND);
 }
 
@@ -432,7 +458,16 @@ write_host_entry(FILE *f, const char *host, const char *ip,
 	else
 		fprintf(f, "%s ", host);
 
-	if ((r = sshkey_write(key, f)) == 0)
+#ifndef SSH_X509STORE_DISABLED
+	if (sshkey_is_x509(key)) {
+		/* key_write will print x509 certificate in blob format :-( */
+		r = x509key_write_subject(key, f)
+		    ? SSH_ERR_SUCCESS
+		    : SSH_ERR_INTERNAL_ERROR;
+	} else
+		r = sshkey_write(key, f);
+#endif /*ndef SSH_X509STORE_DISABLED*/
+	if (r == 0)
 		success = 1;
 	else
 		error("%s: sshkey_write failed: %s", __func__, ssh_err(r));

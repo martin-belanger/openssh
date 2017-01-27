@@ -73,12 +73,16 @@
 	"diffie-hellman-group18-sha512,"
 # define KEX_SHA2_GROUP14 \
 	"diffie-hellman-group14-sha256,"
-#define	SHA2_HMAC_MODES \
+# define SHA2_HMAC_ETM_MODES \
+	"hmac-sha2-256-etm@openssh.com," \
+	"hmac-sha2-512-etm@openssh.com,"
+# define SHA2_HMAC_MODES \
 	"hmac-sha2-256," \
 	"hmac-sha2-512,"
 #else
 # define KEX_SHA2_METHODS
 # define KEX_SHA2_GROUP14
+# define SHA2_HMAC_ETM_MODES
 # define SHA2_HMAC_MODES
 #endif
 
@@ -127,13 +131,11 @@
 #define KEX_SERVER_MAC \
 	"umac-64-etm@openssh.com," \
 	"umac-128-etm@openssh.com," \
-	"hmac-sha2-256-etm@openssh.com," \
-	"hmac-sha2-512-etm@openssh.com," \
+	SHA2_HMAC_ETM_MODES \
 	"hmac-sha1-etm@openssh.com," \
 	"umac-64@openssh.com," \
 	"umac-128@openssh.com," \
-	"hmac-sha2-256," \
-	"hmac-sha2-512," \
+	SHA2_HMAC_MODES \
 	"hmac-sha1"
 
 #define KEX_CLIENT_MAC KEX_SERVER_MAC
@@ -152,13 +154,11 @@
 #define	KEX_SERVER_MAC \
 	"umac-64-etm@openssh.com," \
 	"umac-128-etm@openssh.com," \
-	"hmac-sha2-256-etm@openssh.com," \
-	"hmac-sha2-512-etm@openssh.com," \
+	SHA2_HMAC_ETM_MODES \
 	"hmac-sha1-etm@openssh.com," \
 	"umac-64@openssh.com," \
 	"umac-128@openssh.com," \
-	"hmac-sha2-256," \
-	"hmac-sha2-512," \
+	SHA2_HMAC_MODES \
 	"hmac-sha1"
 
 #define KEX_CLIENT_KEX KEX_SERVER_KEX

@@ -1,4 +1,4 @@
-#	$OpenBSD: sshd_config,v 1.100 2016/08/15 12:32:04 naddy Exp $
+#	$OpenBSD: sshd_config,v 1.99 2016/07/11 03:19:44 tedu Exp $
 
 # This is the sshd server system-wide configuration file.  See
 # sshd_config(5) for more information.
@@ -15,10 +15,91 @@
 #ListenAddress 0.0.0.0
 #ListenAddress ::
 
+# The default requires explicit activation of protocol 1
+#Protocol 2
+
+# HostKey for protocol version 1
+#HostKey /etc/ssh/ssh_host_key
+# HostKeys for protocol version 2
 #HostKey /etc/ssh/ssh_host_rsa_key
 #HostKey /etc/ssh/ssh_host_dsa_key
 #HostKey /etc/ssh/ssh_host_ecdsa_key
 #HostKey /etc/ssh/ssh_host_ed25519_key
+
+# "key type names" for X.509 certificates with EC key
+#X509KeyAlgorithm x509v3-ecdsa-sha2-nistp256,sha256,ecdsa-sha2-nistp256
+#X509KeyAlgorithm x509v3-ecdsa-sha2-nistp384,sha384,ecdsa-sha2-nistp384
+#X509KeyAlgorithm x509v3-ecdsa-sha2-nistp521,sha512,ecdsa-sha2-nistp521
+
+# "key type names" for X.509 certificates with RSA key
+# Note first defined is used in signature operations!
+#X509KeyAlgorithm x509v3-sign-rsa,rsa-sha1
+#X509KeyAlgorithm x509v3-sign-rsa,rsa-md5
+
+# "key type names" for X.509 certificates with DSA key
+# Note first defined is used in signature operations!
+#X509KeyAlgorithm x509v3-sign-dss,dss-asn1
+#X509KeyAlgorithm x509v3-sign-dss,dss-raw
+
+# The intended use for the X509 client certificate. Without this option
+# no chain verification will be done. Currently accepted uses are case
+# insensitive:
+#  - "sslclient", "SSL client", "SSL_client" or "client"
+#  - "any", "Any Purpose", "Any_Purpose" or "AnyPurpose"
+#  - "skip" or ""(empty): don`t check purpose.
+#AllowedCertPurpose sslclient
+
+# Specifies whether self-issued(self-signed) X.509 certificate can be
+# allowed only by entry in AutorizedKeysFile that contain matching
+# public key or certificate blob.
+#KeyAllowSelfIssued no
+
+# Specifies whether CRL must present in store for all certificates in
+# certificate chain with atribute "cRLDistributionPoints"
+#MandatoryCRL no
+
+# A file with multiple certificates of certificate signers
+# in PEM format concatenated together.
+#CACertificateFile /etc/ssh/ca/ca-bundle.crt
+
+# A directory with certificates of certificate signers.
+# The certificates should have name of the form: [HASH].[NUMBER]
+# or have symbolic links to them of this form.
+#CACertificatePath /etc/ssh/ca/crt
+
+# A file with multiple CRL of certificate signers
+# in PEM format concatenated together.
+#CARevocationFile /etc/ssh/ca/ca-bundle.crl
+
+# A directory with CRL of certificate signers.
+# The CRL should have name of the form: [HASH].r[NUMBER]
+# or have symbolic links to them of this form.
+#CARevocationPath /etc/ssh/ca/crl
+
+# LDAP protocol version.
+# Example:
+# CAldapVersion 2
+
+# Note because of OpenSSH options parser limitation
+# use %3D instead of = !
+# LDAP initialization may require URL to be escaped, i.e.
+# use %2C instead of ,(comma). Escaped URL don't depend from
+# LDAP initialization method.
+# Example:
+# CAldapURL ldap://localhost:389/dc%3Dexample%2Cdc%3Dcom
+
+# SSH can use "Online Certificate Status Protocol"(OCSP)
+# to validate certificate. Set VAType to
+#  - none    : do not use OCSP to validate certificates;
+#  - ocspcert: validate only certificates that specify `OCSP
+#      Service Locator' URL;
+#  - ocspspec: use specified in the configuration 'OCSP Responder'
+#      to validate all certificates.
+#VAType none
+
+# Lifetime and size of ephemeral version 1 server key
+#KeyRegenerationInterval 1h
+#ServerKeyBits 1024
 
 # Ciphers and keying
 #RekeyLimit default none
@@ -35,6 +116,7 @@
 #MaxAuthTries 6
 #MaxSessions 10
 
+#RSAAuthentication yes
 #PubkeyAuthentication yes
 
 # The default is to check both .ssh/authorized_keys and .ssh/authorized_keys2
@@ -47,9 +129,11 @@ AuthorizedKeysFile	.ssh/authorized_keys
 #AuthorizedKeysCommandUser nobody
 
 # For this to work you will also need host keys in /etc/ssh/ssh_known_hosts
+#RhostsRSAAuthentication no
+# similar for protocol version 2
 #HostbasedAuthentication no
 # Change to yes if you don't trust ~/.ssh/known_hosts for
-# HostbasedAuthentication
+# RhostsRSAAuthentication and HostbasedAuthentication
 #IgnoreUserKnownHosts no
 # Don't read the user's ~/.rhosts and ~/.shosts files
 #IgnoreRhosts yes

@@ -14,15 +14,16 @@ AC_DEFUN([OSSH_CHECK_CFLAG_COMPILE], [{
 	AC_COMPILE_IFELSE([AC_LANG_SOURCE([[
 #include <stdlib.h>
 #include <stdio.h>
-int main(int argc, char **argv) {
+int
+main(int argc, char *argv[]) {
 	/* Some math to catch -ftrapv problems in the toolchain */
 	int i = 123 * argc, j = 456 + argc, k = 789 - argc;
 	float l = i * 2.1;
 	double m = l / 0.5;
 	long long int n = argc * 12345LL, o = 12345LL * (long long int)argc;
 	printf("%d %d %d %f %f %lld %lld\n", i, j, k, l, m, n, o);
-	exit(0);
-}
+(void) argv;
+return 0; }
 	]])],
 		[
 if `grep -i "unrecognized option" conftest.err >/dev/null`
@@ -51,7 +52,8 @@ AC_DEFUN([OSSH_CHECK_CFLAG_LINK], [{
 	AC_LINK_IFELSE([AC_LANG_SOURCE([[
 #include <stdlib.h>
 #include <stdio.h>
-int main(int argc, char **argv) {
+int
+main(int argc, char *argv[]) {
 	/* Some math to catch -ftrapv problems in the toolchain */
 	int i = 123 * argc, j = 456 + argc, k = 789 - argc;
 	float l = i * 2.1;
@@ -59,8 +61,8 @@ int main(int argc, char **argv) {
 	long long int n = argc * 12345LL, o = 12345LL * (long long int)argc;
 	long long int p = n * o;
 	printf("%d %d %d %f %f %lld %lld %lld\n", i, j, k, l, m, n, o, p);
-	exit(0);
-}
+(void) argv;
+return 0; }
 	]])],
 		[
 if `grep -i "unrecognized option" conftest.err >/dev/null`
@@ -89,7 +91,8 @@ AC_DEFUN([OSSH_CHECK_LDFLAG_LINK], [{
 	AC_LINK_IFELSE([AC_LANG_SOURCE([[
 #include <stdlib.h>
 #include <stdio.h>
-int main(int argc, char **argv) {
+int
+main(int argc, char *argv[]) {
 	/* Some math to catch -ftrapv problems in the toolchain */
 	int i = 123 * argc, j = 456 + argc, k = 789 - argc;
 	float l = i * 2.1;
@@ -97,8 +100,8 @@ int main(int argc, char **argv) {
 	long long int n = argc * 12345LL, o = 12345LL * (long long int)argc;
 	long long p = n * o;
 	printf("%d %d %d %f %f %lld %lld %lld\n", i, j, k, l, m, n, o, p);
-	exit(0);
-}
+(void) argv;
+return 0; }
 		]])],
 		[ AC_MSG_RESULT([yes])
 		  LDFLAGS="$saved_LDFLAGS $_define_flag"],

@@ -2,6 +2,8 @@
 
 /*
  * Copyright (c) 2000, 2001 Markus Friedl.  All rights reserved.
+ * X.509 certificates support,
+ * Copyright (c) 2002-2015 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -31,13 +33,18 @@
 #ifdef WITH_OPENSSL
 #include <openssl/rsa.h>
 #include <openssl/dsa.h>
-# ifdef OPENSSL_HAS_ECC
+# if defined(OPENSSL_HAS_ECC) || defined(HAVE_OPENSSL_EC_H)
 #  include <openssl/ec.h>
+#  if OPENSSL_VERSION_NUMBER < 0x00908000L
+    /* before OpenSSL 0.9.8 */
+#   define EC_KEY	void
+#  endif
 # else /* OPENSSL_HAS_ECC */
 #  define EC_KEY	void
 #  define EC_GROUP	void
 #  define EC_POINT	void
 # endif /* OPENSSL_HAS_ECC */
+#include <openssl/x509.h>
 #else /* WITH_OPENSSL */
 # define RSA		void
 # define DSA		void
@@ -55,8 +62,11 @@ struct sshbuf;
 enum sshkey_types {
 	KEY_RSA1,
 	KEY_RSA,
+	KEY_X509_RSA,
 	KEY_DSA,
+	KEY_X509_DSA,
 	KEY_ECDSA,
+	KEY_X509_ECDSA,
 	KEY_ED25519,
 	KEY_RSA_CERT,
 	KEY_DSA_CERT,
@@ -66,7 +76,11 @@ enum sshkey_types {
 };
 
 /* Default fingerprint hash */
+#ifdef HAVE_EVP_SHA256
 #define SSH_FP_HASH_DEFAULT	SSH_DIGEST_SHA256
+#else
+#define SSH_FP_HASH_DEFAULT	SSH_DIGEST_SHA1
+#endif
 
 /* Fingerprint representation formats */
 enum sshkey_fp_rep {
@@ -95,6 +109,30 @@ struct sshkey_cert {
 	struct sshkey	*signature_key;
 };
 
+
+typedef struct ssh_x509_st SSH_X509;
+
+SSH_X509*	SSH_X509_new(void);
+void		SSH_X509_free(SSH_X509* xd);
+X509*		SSH_X509_get_cert(SSH_X509 *xd);
+
+/* NOTE
+ * Final solution:
+ * a) should not use {KEY_X509_RSA"|DSA|ECDSA} is switch statements, i.e
+ *   X.509 support has to be redesigned to use "plain key type"
+ *   and if is key_is_x509() to perform specific operations;
+ * b) code has to be redesigned to use "keyname" (strings) to allow
+ *   a key to be used with multiple names.
+ * Temporary solution.
+ * - macro X509KEY_BASETYPE that return KEY_{RSA|DSA|ECDSA};
+ * - use macro where is posible;
+ * - remove macro after implementation of a) and b).
+ */
+
+#define X509KEY_BASETYPE(key)		(sshkey_is_x509(key) ? sshkey_type_plain(key->type) : key->type)
+#define X509TYPE_BASE(name, type)	(ssh_x509key_type(name) != KEY_UNSPEC ? sshkey_type_plain(type) : type)
+
+
 /* XXX opaquify? */
 struct sshkey {
 	int	 type;
@@ -105,6 +143,7 @@ struct sshkey {
 	EC_KEY	*ecdsa;
 	u_char	*ed25519_sk;
 	u_char	*ed25519_pk;
+	SSH_X509 *x509_data;
 	struct sshkey_cert *cert;
 };
 
@@ -116,9 +155,13 @@ int		 sshkey_add_private(struct sshkey *);
 struct sshkey	*sshkey_new_private(int);
 void		 sshkey_free(struct sshkey *);
 int		 sshkey_demote(const struct sshkey *, struct sshkey **);
+int		 sshrsa_equal_public(const RSA*, const RSA*);
+int		 sshdsa_equal_public(const DSA*, const DSA*);
 int		 sshkey_equal_public(const struct sshkey *,
     const struct sshkey *);
 int		 sshkey_equal(const struct sshkey *, const struct sshkey *);
+		 /*bool*/
+int	 	 sshkey_match_pkalg(struct sshkey *key, const char* pkalg);
 char		*sshkey_fingerprint(const struct sshkey *,
     int, enum sshkey_fp_rep);
 int		 sshkey_fingerprint_raw(const struct sshkey *k,
@@ -127,11 +170,14 @@ const char	*sshkey_type(const struct sshkey *);
 const char	*sshkey_cert_type(const struct sshkey *);
 int		 sshkey_write(const struct sshkey *, FILE *);
 int		 sshkey_read(struct sshkey *, char **);
+int		 sshkey_read_pkalg(struct sshkey *, char **, char **);
 u_int		 sshkey_size(const struct sshkey *);
 
 int		 sshkey_generate(int type, u_int bits, struct sshkey **keyp);
 int		 sshkey_from_private(const struct sshkey *, struct sshkey **);
 int	 sshkey_type_from_name(const char *);
+void	 sshkey_types_from_name(const char *name, int *type, int *subtype);
+int	 sshkey_is_x509(const struct sshkey *);
 int	 sshkey_is_cert(const struct sshkey *);
 int	 sshkey_type_is_cert(int);
 int	 sshkey_type_plain(int);

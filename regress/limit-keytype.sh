@@ -82,7 +82,7 @@ ${SSH} $opts -i $OBJ/user_key2 proxy true && fatal "key2 succeeded"
 # Allow RSA in main config, Ed25519 for non-existent user.
 verbose "match w/ no match"
 prepare_config "PubkeyAcceptedKeyTypes ssh-rsa" \
-	"Match user x$USER" "PubkeyAcceptedKeyTypes +ssh-ed25519"
+	"Match user x$USER" "PubkeyAcceptedKeyTypes ssh-ed25519"
 ${SSH} $certopts proxy true && fatal "cert succeeded"
 ${SSH} $opts -i $OBJ/user_key1 proxy true && fatal "key1 succeeded"
 ${SSH} $opts -i $OBJ/user_key2 proxy true || fatal "key2 failed"
@@ -90,7 +90,7 @@ ${SSH} $opts -i $OBJ/user_key2 proxy true || fatal "key2 failed"
 # Allow only DSA in main config, Ed25519 for user.
 verbose "match w/ matching"
 prepare_config "PubkeyAcceptedKeyTypes ssh-dss" \
-	"Match user $USER" "PubkeyAcceptedKeyTypes +ssh-ed25519"
+	"Match user $USER" "PubkeyAcceptedKeyTypes ssh-rsa-cert-v01@openssh.com,ssh-ed25519"
 ${SSH} $certopts proxy true || fatal "cert failed"
 ${SSH} $opts -i $OBJ/user_key1 proxy true || fatal "key1 failed"
 ${SSH} $opts -i $OBJ/user_key4 proxy true && fatal "key4 succeeded"

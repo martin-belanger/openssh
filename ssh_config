@@ -42,6 +42,17 @@
 #   Ciphers aes128-ctr,aes192-ctr,aes256-ctr,arcfour256,arcfour128,aes128-cbc,3des-cbc
 #   MACs hmac-md5,hmac-sha1,umac-64@openssh.com,hmac-ripemd160
 #   EscapeChar ~
+#   AllowedCertPurpose sslserver
+#   MandatoryCRL no
+#   CACertificateFile /etc/ssh/ca/ca-bundle.crt
+#   CACertificatePath /etc/ssh/ca/crt
+#   CARevocationFile /etc/ssh/ca/ca-bundle.crl
+#   CARevocationPath /etc/ssh/ca/crl
+#   UserCACertificateFile ~/.ssh/ca-bundle.crt
+#   UserCACertificatePath ~/.ssh/crt
+#   UserCARevocationFile ~/.ssh/ca-bundle.crl
+#   UserCARevocationPath ~/.ssh/crl
+#   VAType none
 #   Tunnel no
 #   TunnelDevice any:any
 #   PermitLocalCommand no

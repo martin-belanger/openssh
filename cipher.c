@@ -13,6 +13,7 @@
  *
  * Copyright (c) 1999 Niels Provos.  All rights reserved.
  * Copyright (c) 1999, 2000 Markus Friedl.  All rights reserved.
+ * Copyright (c) 2011 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -45,11 +46,23 @@
 
 #include "cipher.h"
 #include "misc.h"
+#include "xmalloc.h"
+#include "log.h"
 #include "sshbuf.h"
 #include "ssherr.h"
 #include "digest.h"
 
 #include "openbsd-compat/openssl-compat.h"
+#include "evp-compat.h"
+
+#if (OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER))
+/* TODO: OpenSSL 1.1 resets EVP_CIPHER_CTX on each call of
+ * EVP_CipherInit - it is init function ;)!
+ * Lets use single init before to be fixed in OpenSSH.
+ */
+#  define SINGLE_EVP_CIPHERINIT_CALL
+#endif
+
 
 #ifdef WITH_SSH1
 extern const EVP_CIPHER *evp_ssh1_bf(void);
@@ -138,6 +151,23 @@ static const struct sshcipher ciphers[] = {
 
 /*--*/
 
+static inline int/*bool*/
+cipher_allowed(const struct sshcipher *c) {
+#ifdef OPENSSL_FIPS
+	if (FIPS_mode()) {
+		const EVP_CIPHER *evp = NULL;
+		if (c->evptype == NULL) return(0);
+		evp = c->evptype();
+		if (evp == NULL) return(0);
+		if ((EVP_CIPHER_flags(evp) & EVP_CIPH_FLAG_FIPS) == 0)
+			return(0);
+	}
+#else
+	(void) c;
+#endif
+	return(1);
+}
+
 /* Returns a comma-separated list of supported ciphers. */
 char *
 cipher_alg_list(char sep, int auth_only)
@@ -150,6 +180,8 @@ cipher_alg_list(char sep, int auth_only)
 		if (c->number != SSH_CIPHER_SSH2)
 			continue;
 		if (auth_only && c->auth_len == 0)
+			continue;
+		if (!cipher_allowed(c))
 			continue;
 		if (ret != NULL)
 			ret[rlen++] = sep;
@@ -244,7 +276,11 @@ cipher_by_name(const char *name)
 	const struct sshcipher *c;
 	for (c = ciphers; c->name != NULL; c++)
 		if (strcmp(c->name, name) == 0)
+		{
+			if (!cipher_allowed(c))
+				continue;
 			return c;
+		}
 	return NULL;
 }
 
@@ -254,7 +290,11 @@ cipher_by_number(int id)
 	const struct sshcipher *c;
 	for (c = ciphers; c->name != NULL; c++)
 		if (c->number == id)
+		{
+			if (!cipher_allowed(c))
+				continue;
 			return c;
+		}
 	return NULL;
 }
 
@@ -282,6 +322,41 @@ ciphers_valid(const char *names)
 	return 1;
 }
 
+#ifdef OPENSSL_FIPS
+char*
+only_fips_valid_ciphers(const char* names)
+{
+	Buffer b;
+	char *fips_names, *cp, *p;
+
+	if (names == NULL || *names == '\0')
+		return NULL;
+
+	buffer_init(&b);
+
+	/* default set in myproposals.h */
+	cp = xstrdup(names);
+	for (p = strsep(&cp, CIPHER_SEP);
+	     p && *p != '\0';
+	     p = strsep(&cp, CIPHER_SEP)
+	) {
+		if (cipher_by_name(p) == NULL) continue;
+
+		if (buffer_len(&b) > 0)
+			buffer_append(&b, ",", 1);
+		buffer_append(&b, p, strlen(p));
+	}
+	buffer_append(&b, "\0", 1);
+
+	fips_names = xstrdup(buffer_ptr(&b));
+
+	buffer_free(&b);
+
+	debug3("%s: ciphers: [%s]", __func__, fips_names);
+	return fips_names;
+}
+#endif
+
 /*
  * Parses the name of the cipher.  Returns the number of the corresponding
  * cipher, or -1 on error.
@@ -295,7 +370,11 @@ cipher_number(const char *name)
 		return -1;
 	for (c = ciphers; c->name != NULL; c++)
 		if (strcasecmp(c->name, name) == 0)
+		{
+			if (!cipher_allowed(c))
+				continue;
 			return c->number;
+		}
 	return -1;
 }
 
@@ -372,7 +451,11 @@ cipher_init(struct sshcipher_ctx **ccp, const struct sshcipher *cipher,
 		ret = SSH_ERR_ALLOC_FAIL;
 		goto out;
 	}
+#ifndef SINGLE_EVP_CIPHERINIT_CALL
 	if (EVP_CipherInit(cc->evp, type, NULL, (u_char *)iv,
+#else
+	if (EVP_CipherInit(cc->evp, type, key, (u_char *)iv,
+#endif /*ndef SINGLE_EVP_CIPHERINIT_CALL*/
 	    (do_encrypt == CIPHER_ENCRYPT)) == 0) {
 		ret = SSH_ERR_LIBCRYPTO_ERROR;
 		goto out;
@@ -390,10 +473,12 @@ cipher_init(struct sshcipher_ctx **ccp, const struct sshcipher *cipher,
 			goto out;
 		}
 	}
+#ifndef SINGLE_EVP_CIPHERINIT_CALL
 	if (EVP_CipherInit(cc->evp, NULL, (u_char *)key, NULL, -1) == 0) {
 		ret = SSH_ERR_LIBCRYPTO_ERROR;
 		goto out;
 	}
+#endif /*ndef SINGLE_EVP_CIPHERINIT_CALL*/
 
 	if (cipher->discard_len > 0) {
 		if ((junk = malloc(cipher->discard_len)) == NULL ||
@@ -420,8 +505,8 @@ cipher_init(struct sshcipher_ctx **ccp, const struct sshcipher *cipher,
 	} else {
 		if (cc != NULL) {
 #ifdef WITH_OPENSSL
-			if (cc->evp != NULL)
-				EVP_CIPHER_CTX_free(cc->evp);
+			EVP_CIPHER_CTX_free(cc->evp);
+			cc->evp = NULL;
 #endif /* WITH_OPENSSL */
 			explicit_bzero(cc, sizeof(*cc));
 			free(cc);
@@ -526,10 +611,8 @@ cipher_free(struct sshcipher_ctx *cc)
 	else if ((cc->cipher->flags & CFLAG_AESCTR) != 0)
 		explicit_bzero(&cc->ac_ctx, sizeof(cc->ac_ctx));
 #ifdef WITH_OPENSSL
-	if (cc->evp != NULL) {
-		EVP_CIPHER_CTX_free(cc->evp);
-		cc->evp = NULL;
-	}
+	EVP_CIPHER_CTX_free(cc->evp);
+	cc->evp = NULL;
 #endif
 	explicit_bzero(cc, sizeof(*cc));
 	free(cc);
@@ -625,7 +708,7 @@ cipher_get_keyiv(struct sshcipher_ctx *cc, u_char *iv, u_int len)
 			   len, iv))
 			       return SSH_ERR_LIBCRYPTO_ERROR;
 		} else
-			memcpy(iv, cc->evp->iv, len);
+			memcpy(iv, EVP_CIPHER_CTX_iv(cc->evp), len);
 		break;
 #endif
 #ifdef WITH_SSH1
@@ -671,7 +754,7 @@ cipher_set_keyiv(struct sshcipher_ctx *cc, const u_char *iv)
 			    EVP_CTRL_GCM_SET_IV_FIXED, -1, (void *)iv))
 				return SSH_ERR_LIBCRYPTO_ERROR;
 		} else
-			memcpy(cc->evp->iv, iv, evplen);
+			memcpy(EVP_CIPHER_CTX_iv_noconst(cc->evp), iv, evplen);
 		break;
 #endif
 #ifdef WITH_SSH1
@@ -685,8 +768,8 @@ cipher_set_keyiv(struct sshcipher_ctx *cc, const u_char *iv)
 }
 
 #ifdef WITH_OPENSSL
-#define EVP_X_STATE(evp)	(evp)->cipher_data
-#define EVP_X_STATE_LEN(evp)	(evp)->cipher->ctx_size
+#define EVP_X_STATE(evp)	EVP_CIPHER_CTX_get_cipher_data(evp)
+#define EVP_X_STATE_LEN(evp)	EVP_CIPHER_impl_ctx_size(EVP_CIPHER_CTX_cipher(evp))
 #endif
 
 int

@@ -309,7 +309,7 @@ auth_log(Authctxt *authctxt, int authenticated, int partial,
 	else
 		authmsg = authenticated ? "Accepted" : "Failed";
 
-	authlog("%s %s%s%s for %s%.100s from %.200s port %d ssh2%s%s",
+	authlog("%s %s%s%s for %s%.100s from %.200s port %d %s%s%s",
 	    authmsg,
 	    method,
 	    submethod != NULL ? "/" : "", submethod == NULL ? "" : submethod,
@@ -317,6 +317,7 @@ auth_log(Authctxt *authctxt, int authenticated, int partial,
 	    authctxt->user,
 	    ssh_remote_ipaddr(ssh),
 	    ssh_remote_port(ssh),
+	    compat20 ? "ssh2" : "ssh1",
 	    authctxt->info != NULL ? ": " : "",
 	    authctxt->info != NULL ? authctxt->info : "");
 	free(authctxt->info);
@@ -349,11 +350,12 @@ auth_maxtries_exceeded(Authctxt *authctxt)
 	struct ssh *ssh = active_state; /* XXX */
 
 	error("maximum authentication attempts exceeded for "
-	    "%s%.100s from %.200s port %d ssh2",
+	    "%s%.100s from %.200s port %d %s",
 	    authctxt->valid ? "" : "invalid user ",
 	    authctxt->user,
 	    ssh_remote_ipaddr(ssh),
-	    ssh_remote_port(ssh));
+	    ssh_remote_port(ssh),
+	    compat20 ? "ssh2" : "ssh1");
 	packet_disconnect("Too many authentication failures");
 	/* NOTREACHED */
 }

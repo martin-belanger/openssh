@@ -11,6 +11,29 @@
  * software must be clearly marked as such, and if the derived work is
  * incompatible with the protocol description in the RFC file, it must be
  * called by a name other than "ssh" or "Secure Shell".
+ *
+ * X.509 certificates support,
+ * Copyright (c) 2002-2015 Roumen Petrov.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "includes.h"
@@ -51,6 +74,7 @@
 #include "uidswap.h"
 #include "compat.h"
 #include "key.h"
+#include "ssh-x509.h"
 #include "sshconnect.h"
 #include "hostfile.h"
 #include "log.h"
@@ -525,8 +549,8 @@ send_client_banner(int connection_out, int minor1)
 {
 	/* Send our own protocol version identification. */
 	if (compat20) {
-		xasprintf(&client_version_string, "SSH-%d.%d-%.100s\r\n",
-		    PROTOCOL_MAJOR_2, PROTOCOL_MINOR_2, SSH_VERSION);
+		xasprintf(&client_version_string, "SSH-%d.%d-%.100s PKIX[%s]\r\n",
+		    PROTOCOL_MAJOR_2, PROTOCOL_MINOR_2, SSH_VERSION, PACKAGE_VERSION);
 	} else {
 		xasprintf(&client_version_string, "SSH-%d.%d-%.100s\n",
 		    PROTOCOL_MAJOR_1, minor1, SSH_VERSION);
@@ -815,6 +839,7 @@ check_host_key(char *hostname, struct sockaddr *hostaddr, u_short port,
 	char *ip = NULL, *host = NULL;
 	char hostline[1000], *hostp, *fp, *ra;
 	char msg[1024];
+	char extramsg[1024], *subject = NULL;
 	const char *type;
 	const struct hostkey_entry *host_found, *ip_found;
 	int len, cancelled_forwarding = 0;
@@ -983,16 +1008,30 @@ check_host_key(char *hostname, struct sockaddr *hostaddr, u_short port,
 					    "No matching host key fingerprint"
 					    " found in DNS.\n");
 			}
+			if (key_is_x509(host_key)) {
+				subject = x509key_subject(host_key);
+				snprintf(extramsg, sizeof(extramsg),
+				    "Distinguished name is '%s'.\n",
+				    subject);
+			} else {
+				subject = NULL;
+				*extramsg = '\0';
+			}
 			snprintf(msg, sizeof(msg),
 			    "The authenticity of host '%.200s (%s)' can't be "
 			    "established%s\n"
 			    "%s key fingerprint is %s.%s%s\n%s"
+			    "%s"
 			    "Are you sure you want to continue connecting "
 			    "(yes/no)? ",
 			    host, ip, msg1, type, fp,
 			    options.visual_host_key ? "\n" : "",
 			    options.visual_host_key ? ra : "",
-			    msg2);
+			    msg2, extramsg);
+			if(subject != NULL) {
+				free(subject);
+				subject = NULL;
+			}
 			free(ra);
 			free(fp);
 			if (!confirm(msg))
@@ -1065,7 +1104,7 @@ check_host_key(char *hostname, struct sockaddr *hostaddr, u_short port,
 		if (readonly == ROQUIET)
 			goto fail;
 		if (options.check_host_ip && host_ip_differ) {
-			char *key_msg;
+			const char *key_msg;
 			if (ip_status == HOST_NEW)
 				key_msg = "is unknown";
 			else if (ip_status == HOST_OK)
@@ -1324,10 +1363,16 @@ verify_host_key(char *host, struct sockaddr *hostaddr, Key *host_key)
 				if (flags & DNS_VERIFY_MATCH) {
 					matching_host_key_dns = 1;
 				} else {
+					const char *rr = "";
 					warn_changed_key(plain);
-					error("Update the SSHFP RR in DNS "
+					if (key_is_x509(host_key)) {
+						rr = "CERT";
+					} else {
+						rr = "SSHFP";
+					}
+					error("Update the %s RR in DNS "
 					    "with the new host key to get rid "
-					    "of this message.");
+					    "of this message.", rr);
 				}
 			}
 		}
@@ -1389,6 +1434,7 @@ ssh_login(Sensitive *sensitive, const char *orighost,
 		fatal("ssh1 is not supported");
 #endif
 	}
+	free(host);
 	free(local_user);
 }
 
@@ -1422,15 +1468,29 @@ show_other_keys(struct hostkeys *hostkeys, Key *key)
 		KEY_ED25519,
 		-1
 	};
+	int subtype[] = {
+#ifdef OPENSSL_HAS_ECC
+		NID_X9_62_prime256v1,
+		NID_secp384r1,
+# ifdef OPENSSL_HAS_NISTP521
+		NID_secp521r1,
+# endif
+#endif /* OPENSSL_HAS_ECC */
+		-1 /* non-ECC keys has to be processed once */,
+		-1
+	};
 	int i, ret = 0;
 	char *fp, *ra;
 	const struct hostkey_entry *found;
 
 	for (i = 0; type[i] != -1; i++) {
-		if (type[i] == key->type)
-			continue;
-		if (!lookup_key_in_hostkeys_by_type(hostkeys, type[i], &found))
-			continue;
+	int k;
+	k = (type[i] == KEY_ECDSA) ? 0 : (sizeof(subtype) / sizeof(*subtype) - 2);
+	do {
+		if (type[i] == key->type && subtype[k] == key->ecdsa_nid)
+			goto nextsubtype;
+		if (!lookup_key_in_hostkeys_by_types(hostkeys, type[i], subtype[k], &found))
+			goto nextsubtype;
 		fp = sshkey_fingerprint(found->key,
 		    options.fingerprint_hash, SSH_FP_DEFAULT);
 		ra = sshkey_fingerprint(found->key,
@@ -1443,11 +1503,19 @@ show_other_keys(struct hostkeys *hostkeys, Key *key)
 		    key_type(found->key),
 		    found->host, found->file, found->line,
 		    key_type(found->key), fp);
+		if (key_is_x509(found->key)) {
+			char *subject = x509key_subject(found->key);
+			logit("Distinguished name found is '%s'.", subject);
+			free(subject);
+		}
 		if (options.visual_host_key)
 			logit("%s", ra);
 		free(ra);
 		free(fp);
 		ret = 1;
+nextsubtype:
+		k++;
+	} while(subtype[k] != -1);
 	}
 	return ret;
 }
@@ -1470,6 +1538,11 @@ warn_changed_key(Key *host_key)
 	error("It is also possible that a host key has just been changed.");
 	error("The fingerprint for the %s key sent by the remote host is\n%s.",
 	    key_type(host_key), fp);
+	if (key_is_x509(host_key)) {
+		char *subject = x509key_subject(host_key);
+		error("Distinguished name sent by remote host is '%s'.", subject);
+		free(subject);
+	}
 	error("Please contact your system administrator.");
 
 	free(fp);

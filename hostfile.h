@@ -37,7 +37,7 @@ void	 free_hostkeys(struct hostkeys *);
 
 HostStatus check_key_in_hostkeys(struct hostkeys *, struct sshkey *,
     const struct hostkey_entry **);
-int	 lookup_key_in_hostkeys_by_type(struct hostkeys *, int,
+int	 lookup_key_in_hostkeys_by_types(struct hostkeys *, int /*keytype*/, int /*subtype*/,
     const struct hostkey_entry **);
 
 int	 hostfile_read_key(char **, u_int *, struct sshkey *);

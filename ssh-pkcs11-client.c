@@ -1,6 +1,7 @@
 /* $OpenBSD: ssh-pkcs11-client.c,v 1.6 2015/12/11 00:20:04 mmcc Exp $ */
 /*
  * Copyright (c) 2010 Markus Friedl.  All rights reserved.
+ * Copyright (c) 2016 Roumen Petrov.  All rights reserved.
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -19,6 +20,11 @@
 
 #ifdef ENABLE_PKCS11
 
+#ifndef HAVE_RSA_PKCS1_OPENSSL
+# undef RSA_PKCS1_OpenSSL
+# define RSA_PKCS1_OpenSSL RSA_PKCS1_SSLeay
+#endif
+
 #include <sys/types.h>
 #ifdef HAVE_SYS_TIME_H
 # include <sys/time.h>
@@ -31,6 +37,7 @@
 #include <errno.h>
 
 #include <openssl/rsa.h>
+#include "evp-compat.h"
 
 #include "pathnames.h"
 #include "xmalloc.h"
@@ -93,6 +100,7 @@ recv_msg(Buffer *m)
 int
 pkcs11_init(int interactive)
 {
+	(void)interactive;
 	return (0);
 }
 
@@ -139,17 +147,159 @@ pkcs11_rsa_private_encrypt(int flen, const u_char *from, u_char *to, RSA *rsa,
 	return (ret);
 }
 
+#ifdef OPENSSL_HAS_ECC
+static ECDSA_SIG*
+pkcs11_ecdsa_do_sign(
+	const unsigned char *dgst, int dlen,
+	const BIGNUM *inv, const BIGNUM *rp,
+	EC_KEY *ec
+) {
+	ECDSA_SIG* ret = NULL;
+	Key key;
+	Buffer msg;
+
+	(void)inv;
+	(void)rp;
+
+	key.type = KEY_ECDSA;
+	key.ecdsa = ec;
+	key.ecdsa_nid = sshkey_ecdsa_key_to_nid(ec);
+{
+	u_char *blob;
+	u_int blen;
+
+	if (key_to_blob(&key, &blob, &blen) == 0)
+		goto done;
+
+	buffer_init(&msg);
+	buffer_put_char(&msg, SSH2_AGENTC_SIGN_REQUEST);
+	buffer_put_string(&msg, blob, blen);
+	buffer_put_string(&msg, dgst, dlen);
+	buffer_put_int(&msg, 0);
+	free(blob);
+}
+	send_msg(&msg);
+
+	buffer_clear(&msg);
+
+	if (recv_msg(&msg) == SSH2_AGENT_SIGN_RESPONSE) {
+		u_char *signature;
+		u_int slen = 0;
+
+		signature = buffer_get_string(&msg, &slen);
+		if (signature == NULL) {
+			buffer_free(&msg);
+			goto done;
+		}
+
+		{	/* decode ECDSA signature */
+			const unsigned char *p = signature;
+			ret = d2i_ECDSA_SIG(NULL, &p, slen);
+		}
+		free(signature);
+	}
+	buffer_free(&msg);
+
+done:
+	return (ret);
+}
+
+#ifdef HAVE_EC_KEY_METHOD_NEW
+static int
+pkcs11_ecdsa_sign(int type,
+	const unsigned char *dgst, int dlen,
+	unsigned char *sig, unsigned int *siglen,
+	const BIGNUM *inv, const BIGNUM *rp,
+	EC_KEY *ec
+) {
+	ECDSA_SIG *s;
+
+	debug3("pkcs11_ecdsa_sign");
+	(void)type;
+
+	s = pkcs11_ecdsa_do_sign(dgst, dlen, inv, rp, ec);
+	if (s == NULL) {
+		*siglen = 0;
+		return (0);
+	}
+
+	*siglen = i2d_ECDSA_SIG(s, &sig);
+
+	ECDSA_SIG_free(s);
+	return (1);
+}
+#endif /*def HAVE_EC_KEY_METHOD_NEW*/
+#endif /*def OPENSSL_HAS_ECC*/
+
 /* redirect the private key encrypt operation to the ssh-pkcs11-helper */
 static int
-wrap_key(RSA *rsa)
+wrap_rsa_key(RSA *rsa)
 {
-	static RSA_METHOD helper_rsa;
+	static RSA_METHOD *helper_rsa = NULL;
 
-	memcpy(&helper_rsa, RSA_get_default_method(), sizeof(helper_rsa));
-	helper_rsa.name = "ssh-pkcs11-helper";
-	helper_rsa.rsa_priv_enc = pkcs11_rsa_private_encrypt;
-	RSA_set_method(rsa, &helper_rsa);
+	if (helper_rsa == NULL) {
+		helper_rsa = RSA_meth_dup(RSA_PKCS1_OpenSSL());
+		if (helper_rsa == NULL)
+			return (-1);
+
+		if (!RSA_meth_set1_name(helper_rsa, "ssh-pkcs11-helper")
+		||  !RSA_meth_set_priv_enc(helper_rsa, pkcs11_rsa_private_encrypt)
+		) {
+			RSA_meth_free(helper_rsa);
+			helper_rsa = NULL;
+			return (-1);
+		}
+	}
+
+	if (!RSA_set_method(rsa, helper_rsa))
+		return (-1);
 	return (0);
+}
+
+#ifdef OPENSSL_HAS_ECC
+static int
+wrap_ec_key(EC_KEY *ec)
+{
+#ifdef HAVE_EC_KEY_METHOD_NEW
+	static EC_KEY_METHOD *helper_ec = NULL;
+
+	if (helper_ec == NULL) {
+		helper_ec = EC_KEY_METHOD_new(EC_KEY_OpenSSL());
+		if (helper_ec == NULL)
+			return (-1);
+
+		EC_KEY_METHOD_set_sign(helper_ec,
+		    pkcs11_ecdsa_sign,
+		    NULL /* *sign_setup */,
+		    pkcs11_ecdsa_do_sign);
+	}
+	EC_KEY_set_method(ec, helper_ec);
+#else
+	static ECDSA_METHOD *helper_ec = NULL;
+
+	if (helper_ec == NULL) {
+		helper_ec = ECDSA_METHOD_new(ECDSA_OpenSSL());
+		if (helper_ec == NULL)
+			return (-1);
+
+		ECDSA_METHOD_set_sign(helper_ec,
+		    pkcs11_ecdsa_do_sign);
+	}
+	ECDSA_set_method(ec, helper_ec);
+#endif
+	return (0);
+}
+#endif /*def OPENSSL_HAS_ECC*/
+
+static int
+wrap_key(Key *key) {
+	switch(X509KEY_BASETYPE(key)) {
+	case KEY_RSA: return (wrap_rsa_key(key->rsa));
+#ifdef OPENSSL_HAS_ECC
+	case KEY_ECDSA: return (wrap_ec_key(key->ecdsa));
+#endif
+	default:      return (-1);
+	}
 }
 
 static int
@@ -209,7 +359,10 @@ pkcs11_add_provider(char *name, char *pin, Key ***keysp)
 			blob = buffer_get_string(&msg, &blen);
 			free(buffer_get_string(&msg, NULL));
 			k = key_from_blob(blob, blen);
-			wrap_key(k->rsa);
+			if (wrap_key(k) < 0) {
+				key_free(k);
+				k = NULL;
+			}
 			(*keysp)[i] = k;
 			free(blob);
 		}

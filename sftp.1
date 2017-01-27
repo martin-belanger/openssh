@@ -22,6 +22,14 @@
 .\" (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 .\" THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 .\"
+.\" Implement .Dd with the Mdocdate RCS keyword
+.rn Dd xD
+.de Dd
+.ie \\$1$Mdocdate: \{\
+.	xD \\$2 \\$3, \\$4
+.\}
+.el .xD \\$1 \\$2 \\$3 \\$4 \\$5 \\$6 \\$7 \\$8
+..
 .Dd $Mdocdate: July 16 2016 $
 .Dt SFTP 1
 .Os
@@ -186,73 +194,8 @@ for which there is no separate
 command-line flag.
 For example, to specify an alternate port use:
 .Ic sftp -oPort=24 .
-For full details of the options listed below, and their possible values, see
+For full details of the options and their possible values, see
 .Xr ssh_config 5 .
-.Pp
-.Bl -tag -width Ds -offset indent -compact
-.It AddressFamily
-.It BatchMode
-.It BindAddress
-.It CanonicalDomains
-.It CanonicalizeFallbackLocal
-.It CanonicalizeHostname
-.It CanonicalizeMaxDots
-.It CanonicalizePermittedCNAMEs
-.It CertificateFile
-.It ChallengeResponseAuthentication
-.It CheckHostIP
-.It Cipher
-.It Ciphers
-.It Compression
-.It CompressionLevel
-.It ConnectionAttempts
-.It ConnectTimeout
-.It ControlMaster
-.It ControlPath
-.It ControlPersist
-.It GlobalKnownHostsFile
-.It GSSAPIAuthentication
-.It GSSAPIDelegateCredentials
-.It HashKnownHosts
-.It Host
-.It HostbasedAuthentication
-.It HostbasedKeyTypes
-.It HostKeyAlgorithms
-.It HostKeyAlias
-.It HostName
-.It IdentitiesOnly
-.It IdentityAgent
-.It IdentityFile
-.It IPQoS
-.It KbdInteractiveAuthentication
-.It KbdInteractiveDevices
-.It KexAlgorithms
-.It LogLevel
-.It MACs
-.It NoHostAuthenticationForLocalhost
-.It NumberOfPasswordPrompts
-.It PasswordAuthentication
-.It PKCS11Provider
-.It Port
-.It PreferredAuthentications
-.It Protocol
-.It ProxyCommand
-.It ProxyJump
-.It PubkeyAuthentication
-.It RekeyLimit
-.It RhostsRSAAuthentication
-.It RSAAuthentication
-.It SendEnv
-.It ServerAliveInterval
-.It ServerAliveCountMax
-.It StrictHostKeyChecking
-.It TCPKeepAlive
-.It UpdateHostKeys
-.It UsePrivilegedPort
-.It User
-.It UserKnownHostsFile
-.It VerifyHostKeyDNS
-.El
 .It Fl P Ar port
 Specifies the port to connect to on the remote host.
 .It Fl p

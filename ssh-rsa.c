@@ -1,6 +1,8 @@
 /* $OpenBSD: ssh-rsa.c,v 1.60 2016/09/12 23:39:34 djm Exp $ */
 /*
  * Copyright (c) 2000, 2003 Markus Friedl <markus@openbsd.org>
+ * Copyright (c) 2011 Dr. Stephen Henson.  All rights reserved.
+ * Copyright (c) 2011 Roumen Petrov.  All rights reserved.
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -33,8 +35,21 @@
 #define SSHKEY_INTERNAL
 #include "sshkey.h"
 #include "digest.h"
+#include "evp-compat.h"
+#include "xmalloc.h"
+#include "log.h"
 
+/*NOTE: Do not define USE_LEGACY_RSA_... if build
+  is with FIPS capable OpenSSL */
+/* Define if you want yo use legacy sign code */
+#undef USE_LEGACY_RSA_SIGN
+/* Define if you want yo use legacy verify code */
+#undef USE_LEGACY_RSA_VERIFY
+
+
+#ifdef USE_LEGACY_RSA_VERIFY
 static int openssh_RSA_verify(int, u_char *, size_t, u_char *, size_t, RSA *);
+#endif
 
 static const char *
 rsa_hash_alg_ident(int hash_alg)
@@ -83,9 +98,13 @@ int
 ssh_rsa_sign(const struct sshkey *key, u_char **sigp, size_t *lenp,
     const u_char *data, size_t datalen, const char *alg_ident)
 {
-	u_char digest[SSH_DIGEST_MAX_LENGTH], *sig = NULL;
+#ifdef USE_LEGACY_RSA_SIGN
+	u_char digest[SSH_DIGEST_MAX_LENGTH];
+	u_int dlen;
+#endif
+	u_char *sig = NULL;
 	size_t slen;
-	u_int dlen, len;
+	u_int len;
 	int nid, hash_alg, ret = SSH_ERR_INTERNAL_ERROR;
 	struct sshbuf *b = NULL;
 
@@ -99,15 +118,21 @@ ssh_rsa_sign(const struct sshkey *key, u_char **sigp, size_t *lenp,
 	else
 		hash_alg = rsa_hash_alg_from_ident(alg_ident);
 	if (key == NULL || key->rsa == NULL || hash_alg == -1 ||
-	    sshkey_type_plain(key->type) != KEY_RSA ||
-	    BN_num_bits(key->rsa->n) < SSH_RSA_MINIMUM_MODULUS_SIZE)
+	    sshkey_type_plain(key->type) != KEY_RSA)
 		return SSH_ERR_INVALID_ARGUMENT;
+{
+	const BIGNUM *n = NULL;
+	RSA_get0_key(key->rsa, &n, NULL, NULL);
+	if (BN_num_bits(n) < SSH_RSA_MINIMUM_MODULUS_SIZE)
+		return SSH_ERR_INVALID_ARGUMENT;
+}
 	slen = RSA_size(key->rsa);
 	if (slen <= 0 || slen > SSHBUF_MAX_BIGNUM)
 		return SSH_ERR_INVALID_ARGUMENT;
 
 	/* hash the data */
 	nid = rsa_hash_alg_nid(hash_alg);
+#ifdef USE_LEGACY_RSA_SIGN
 	if ((dlen = ssh_digest_bytes(hash_alg)) == 0)
 		return SSH_ERR_INTERNAL_ERROR;
 	if ((ret = ssh_digest_memory(hash_alg, data, datalen,
@@ -123,6 +148,91 @@ ssh_rsa_sign(const struct sshkey *key, u_char **sigp, size_t *lenp,
 		ret = SSH_ERR_LIBCRYPTO_ERROR;
 		goto out;
 	}
+#else /*ndef USE_LEGACY_RSA_SIGN*/
+{
+	const EVP_MD *evp_md;
+	EVP_PKEY *pkey = NULL;
+	int ok = -1;
+
+	sig = NULL;
+
+	if ((evp_md = EVP_get_digestbynid(nid)) == NULL) {
+		error("%s: EVP_get_digestbynid %d failed", __func__, nid);
+		ret = SSH_ERR_LIBCRYPTO_ERROR;
+		goto out;
+	}
+
+	pkey = EVP_PKEY_new();
+	if (pkey == NULL) {
+		error("%s: out of memory", __func__);
+		goto done;
+	}
+
+	EVP_PKEY_set1_RSA(pkey, key->rsa);
+
+	slen = EVP_PKEY_size(pkey);
+	sig = xmalloc(slen);	/*fatal on error*/
+
+{
+	EVP_MD_CTX *md;
+
+	md = EVP_MD_CTX_new();
+	if (md == NULL) {
+		ok = -1;
+		error("%s: out of memory", __func__);
+		goto clean;
+	}
+
+	ok = EVP_SignInit_ex(md, evp_md, NULL);
+	if (ok <= 0) {
+#ifdef TRACE_EVP_ERROR
+		char ebuf[1024];
+		openssl_errormsg(ebuf, sizeof(ebuf));
+		error("%s: EVP_SignInit_ex fail with errormsg='%.*s'"
+		, __func__
+		, (int)sizeof(ebuf), ebuf);
+#endif
+		goto clean;
+	}
+
+	ok = EVP_SignUpdate(md, data, datalen);
+	if (ok <= 0) {
+#ifdef TRACE_EVP_ERROR
+		char ebuf[1024];
+		openssl_errormsg(ebuf, sizeof(ebuf));
+		error("%s: EVP_SignUpdate fail with errormsg='%.*s'"
+		, __func__
+		, (int)sizeof(ebuf), ebuf);
+#endif
+		goto clean;
+	}
+
+	ok = EVP_SignFinal(md, sig, &len, pkey);
+	if (ok <= 0) {
+#ifdef TRACE_EVP_ERROR
+		char ebuf[1024];
+		openssl_errormsg(ebuf, sizeof(ebuf));
+		error("%s: SignFinal fail with errormsg='%.*s'"
+		, __func__
+		, (int)sizeof(ebuf), ebuf);
+#endif
+		goto clean;
+	}
+
+clean:
+	EVP_MD_CTX_free(md);
+}
+
+done:
+	if (pkey != NULL) EVP_PKEY_free(pkey);
+
+	if (ok <= 0) {
+		ret = SSH_ERR_LIBCRYPTO_ERROR;
+		goto out;
+	}
+}
+#endif /*ndef USE_LEGACY_RSA_SIGN*/
+
 	if (len < slen) {
 		size_t diff = slen - len;
 		memmove(sig + diff, sig, len);
@@ -151,7 +261,9 @@ ssh_rsa_sign(const struct sshkey *key, u_char **sigp, size_t *lenp,
 		*lenp = len;
 	ret = 0;
  out:
+#ifdef USE_LEGACY_RSA_SIGN
 	explicit_bzero(digest, sizeof(digest));
+#endif
 	if (sig != NULL) {
 		explicit_bzero(sig, slen);
 		free(sig);
@@ -166,15 +278,24 @@ ssh_rsa_verify(const struct sshkey *key,
 {
 	char *ktype = NULL;
 	int hash_alg, ret = SSH_ERR_INTERNAL_ERROR;
-	size_t len, diff, modlen, dlen;
+	size_t len, diff, modlen;
 	struct sshbuf *b = NULL;
-	u_char digest[SSH_DIGEST_MAX_LENGTH], *osigblob, *sigblob = NULL;
+	u_char *osigblob, *sigblob = NULL;
+#ifdef USE_LEGACY_RSA_VERIFY
+	size_t dlen;
+	u_char digest[SSH_DIGEST_MAX_LENGTH];
+#endif
 
 	if (key == NULL || key->rsa == NULL ||
 	    sshkey_type_plain(key->type) != KEY_RSA ||
-	    BN_num_bits(key->rsa->n) < SSH_RSA_MINIMUM_MODULUS_SIZE ||
 	    sig == NULL || siglen == 0)
 		return SSH_ERR_INVALID_ARGUMENT;
+{
+	const BIGNUM *n = NULL;
+	RSA_get0_key(key->rsa, &n, NULL, NULL);
+	if (BN_num_bits(n) < SSH_RSA_MINIMUM_MODULUS_SIZE)
+		return SSH_ERR_INVALID_ARGUMENT;
+}
 
 	if ((b = sshbuf_from(sig, siglen)) == NULL)
 		return SSH_ERR_ALLOC_FAIL;
@@ -211,6 +332,7 @@ ssh_rsa_verify(const struct sshkey *key,
 		explicit_bzero(sigblob, diff);
 		len = modlen;
 	}
+#ifdef USE_LEGACY_RSA_VERIFY
 	if ((dlen = ssh_digest_bytes(hash_alg)) == 0) {
 		ret = SSH_ERR_INTERNAL_ERROR;
 		goto out;
@@ -221,6 +343,90 @@ ssh_rsa_verify(const struct sshkey *key,
 
 	ret = openssh_RSA_verify(hash_alg, digest, dlen, sigblob, len,
 	    key->rsa);
+#else /*ndef USE_LEGACY_RSA_VERIFY*/
+{
+	int nid;
+	const EVP_MD *evp_md;
+	EVP_PKEY *pkey;
+	int ok = -1;
+
+	nid = rsa_hash_alg_nid(hash_alg);
+	if ((evp_md = EVP_get_digestbynid(nid)) == NULL) {
+		error("%s: EVP_get_digestbynid %d failed", __func__, nid);
+		free(sigblob);
+		return -1;
+	}
+
+	ok = -1;
+	pkey = EVP_PKEY_new();
+	if (pkey == NULL) {
+		error("%s: out of memory", __func__);
+		goto done;
+	}
+
+	EVP_PKEY_set1_RSA(pkey, key->rsa);
+
+{
+	EVP_MD_CTX *md;
+
+	md = EVP_MD_CTX_new();
+	if (md == NULL) {
+		ok = -1;
+		error("%s: out of memory", __func__);
+		goto clean;
+	}
+
+	ok = EVP_VerifyInit(md, evp_md);
+	if (ok <= 0) {
+#ifdef TRACE_EVP_ERROR
+		char ebuf[1024];
+		openssl_errormsg(ebuf, sizeof(ebuf));
+		error("%s: EVP_VerifyInit fail with errormsg='%.*s'"
+		, __func__
+		, (int)sizeof(ebuf), ebuf);
+#endif
+		goto clean;
+	}
+
+	ok = EVP_VerifyUpdate(md, data, datalen);
+	if (ok <= 0) {
+#ifdef TRACE_EVP_ERROR
+		char ebuf[1024];
+		openssl_errormsg(ebuf, sizeof(ebuf));
+		error("%s: EVP_VerifyUpdate fail with errormsg='%.*s'"
+		, __func__
+		, (int)sizeof(ebuf), ebuf);
+#endif
+		goto clean;
+	}
+
+	ok = EVP_VerifyFinal(md, sigblob, len, pkey);
+	if (ok <= 0) {
+#ifdef TRACE_EVP_ERROR
+		char ebuf[1024];
+		openssl_errormsg(ebuf, sizeof(ebuf));
+		error("%s: EVP_VerifyFinal fail with errormsg='%.*s'"
+		, __func__
+		, (int)sizeof(ebuf), ebuf);
+#endif
+		goto clean;
+	}
+
+clean:
+	EVP_MD_CTX_free(md);
+}
+
+done:
+	if (pkey != NULL) EVP_PKEY_free(pkey);
+
+	if (ok <= 0) {
+		ret = SSH_ERR_LIBCRYPTO_ERROR;
+		goto out;
+	} else
+		ret = SSH_ERR_SUCCESS;
+}
+#endif /*ndef USE_LEGACY_RSA_VERIFY*/
+
  out:
 	if (sigblob != NULL) {
 		explicit_bzero(sigblob, len);
@@ -228,10 +434,13 @@ ssh_rsa_verify(const struct sshkey *key,
 	}
 	free(ktype);
 	sshbuf_free(b);
+#ifdef USE_LEGACY_RSA_VERIFY
 	explicit_bzero(digest, sizeof(digest));
+#endif
 	return ret;
 }
 
+#ifdef USE_LEGACY_RSA_VERIFY
 /*
  * See:
  * http://www.rsasecurity.com/rsalabs/pkcs/pkcs-1/
@@ -353,4 +562,6 @@ done:
 	}
 	return ret;
 }
+#endif /*def USE_LEGACY_RSA_VERIFY*/
+
 #endif /* WITH_OPENSSL */

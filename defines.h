@@ -839,13 +839,24 @@ struct winsize {
  */
 #define DEF_WEAK(x)
 
-/*
- * Platforms that have arc4random_uniform() and not arc4random_stir()
- * shouldn't need the latter.
- */
-#if defined(HAVE_ARC4RANDOM) && defined(HAVE_ARC4RANDOM_UNIFORM) && \
-    !defined(HAVE_ARC4RANDOM_STIR)
-# define arc4random_stir()
+/* Write by owner (BSD compatible)  */
+#ifndef S_IWRITE
+# ifdef S_IWUSR
+#  define S_IWRITE S_IWUSR
+# endif
+#endif
+
+#ifdef OPENSSL_FIPS
+# undef HAVE_ARC4RANDOM
+# undef HAVE_ARC4RANDOM_BUF
+# undef HAVE_ARC4RANDOM_UNIFORM
+#endif
+
+#ifndef HAVE_ARC4RANDOM_STIR
+# ifdef HAVE_ARC4RANDOM
+#  define HAVE_ARC4RANDOM_STIR 1
+   static inline void arc4random_stir(void) {}
+# endif
 #endif
 
 #ifndef HAVE_VA_COPY

@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2005 Darren Tucker <dtucker@zip.com.au>
+ * Copyright (c) 2011-2016 Roumen Petrov.  All rights reserved.
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -22,13 +23,31 @@
 
 #include <openssl/opensslv.h>
 #include <openssl/evp.h>
-#include <openssl/rsa.h>
-#include <openssl/dsa.h>
+#ifndef OPENSSL_NO_RSA
+# include <openssl/rsa.h>
+#endif
+#ifndef OPENSSL_NO_DSA
+# include <openssl/dsa.h>
+#endif
 
 int ssh_compatible_openssl(long, long);
 
-#if (OPENSSL_VERSION_NUMBER <= 0x0090805fL)
-# error OpenSSL 0.9.8f or greater is required
+#if OPENSSL_VERSION_NUMBER <= 0x00906fffL
+# error "OpenSSL 0.9.7 or greater is required"
+#endif
+
+#if OPENSSL_VERSION_NUMBER <= 0x00907fffL
+/* Workaround for bug in some openssl versions before 0.9.8f
+ * We will not use configure check as 0.9.7x define correct
+ * macro or some verdors patch their versions.
+ */
+#undef EVP_CIPHER_CTX_key_length
+#define EVP_CIPHER_CTX_key_length ssh_EVP_CIPHER_CTX_key_length
+
+static inline int
+ssh_EVP_CIPHER_CTX_key_length(const EVP_CIPHER_CTX *ctx) {
+	return ctx->key_len;
+}
 #endif
 
 #if OPENSSL_VERSION_NUMBER < 0x10000001L
@@ -75,26 +94,31 @@ void ssh_aes_ctr_iv(EVP_CIPHER_CTX *, int, u_char *, size_t);
 # endif
 #endif
 
-/*
- * We overload some of the OpenSSL crypto functions with ssh_* equivalents
- * to automatically handle OpenSSL engine initialisation.
- *
- * In order for the compat library to call the real functions, it must
- * define SSH_DONT_OVERLOAD_OPENSSL_FUNCS before including this file and
- * implement the ssh_* equivalents.
- */
-#ifndef SSH_DONT_OVERLOAD_OPENSSL_FUNCS
 
-# ifdef USE_OPENSSL_ENGINE
-#  ifdef OpenSSL_add_all_algorithms
-#   undef OpenSSL_add_all_algorithms
-#  endif
-#  define OpenSSL_add_all_algorithms()  ssh_OpenSSL_add_all_algorithms()
+#ifndef HAVE_BN_IS_NEGATIVE
+# ifndef BN_is_negative
+    /* before OpenSSL 0.9.8 */
+#   define BN_is_negative(a) ((a)->neg != 0)
+#endif
+#endif
+
+# ifndef HAVE_BN_IS_PRIME_EX
+int BN_is_prime_ex(const BIGNUM *, int, BN_CTX *, void *);
 # endif
 
-void ssh_OpenSSL_add_all_algorithms(void);
+#ifndef HAVE_RSA_GENERATE_KEY_EX
+int RSA_generate_key_ex(RSA *, int, BIGNUM *, void *);
+#endif
 
-#endif	/* SSH_DONT_OVERLOAD_OPENSSL_FUNCS */
+#ifndef HAVE_DSA_GENERATE_PARAMETERS_EX
+int DSA_generate_parameters_ex(DSA *, int, const unsigned char *, int, int *,
+    unsigned long *, void *);
+#endif
+
+extern int  ssh_FIPS_mode(int onoff);
+
+extern void ssh_OpenSSL_startup(void);
+extern void ssh_OpenSSL_shuthdown(void);
 
 #endif /* WITH_OPENSSL */
 #endif /* _OPENSSL_COMPAT_H */

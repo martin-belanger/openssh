@@ -605,6 +605,11 @@ ssh_packet_close(struct ssh *ssh)
 	ssh->remote_ipaddr = NULL;
 	free(ssh->state);
 	ssh->state = NULL;
+
+	if (ssh->kex != NULL) {
+		kex_free(ssh->kex);
+		ssh->kex = NULL;
+	}
 }
 
 /* Sets remote side protocol flags. */
@@ -2460,11 +2465,13 @@ static int
 kex_to_blob(struct sshbuf *m, struct kex *kex)
 {
 	int r;
+	const char *s = kex->hostkey_alg;
 
 	if ((r = sshbuf_put_string(m, kex->session_id,
 	    kex->session_id_len)) != 0 ||
 	    (r = sshbuf_put_u32(m, kex->we_need)) != 0 ||
-	    (r = sshbuf_put_u32(m, kex->hostkey_type)) != 0 ||
+	    /* TODO why to send hostkey_foo as is not set? */
+	    (r = sshbuf_put_cstring(m, (s ? s : ""))) != 0 ||
 	    (r = sshbuf_put_u32(m, kex->kex_type)) != 0 ||
 	    (r = sshbuf_put_stringb(m, kex->my)) != 0 ||
 	    (r = sshbuf_put_stringb(m, kex->peer)) != 0 ||
@@ -2664,7 +2671,7 @@ kex_from_blob(struct sshbuf *m, struct kex **kexp)
 	}
 	if ((r = sshbuf_get_string(m, &kex->session_id, &kex->session_id_len)) != 0 ||
 	    (r = sshbuf_get_u32(m, &kex->we_need)) != 0 ||
-	    (r = sshbuf_get_u32(m, (u_int *)&kex->hostkey_type)) != 0 ||
+	    (r = sshbuf_get_cstring(m, &kex->hostkey_alg, NULL)) != 0 ||
 	    (r = sshbuf_get_u32(m, &kex->kex_type)) != 0 ||
 	    (r = sshbuf_get_stringb(m, kex->my)) != 0 ||
 	    (r = sshbuf_get_stringb(m, kex->peer)) != 0 ||

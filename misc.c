@@ -29,7 +29,6 @@
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <sys/un.h>
 
 #include <limits.h>
@@ -208,7 +207,14 @@ pwcopy(struct passwd *pw)
 	struct passwd *copy = xcalloc(1, sizeof(*copy));
 
 	copy->pw_name = xstrdup(pw->pw_name);
+#if defined(__ANDROID__)
+	/* FIXME: password is NULL on Android */
+	copy->pw_passwd = xstrdup(pw->pw_passwd ? pw->pw_passwd :
+	/* fake password from auth.c */
+	"$2a$06$r3.juUaHZDlIbQaO2dS9FuYxL1W9M81R1Tc92PoSNmzvpEqLkLGrK");
+#else
 	copy->pw_passwd = xstrdup(pw->pw_passwd);
+#endif
 #ifdef HAVE_STRUCT_PASSWD_PW_GECOS
 	copy->pw_gecos = xstrdup(pw->pw_gecos);
 #endif
@@ -1251,6 +1257,21 @@ bind_permitted(int port, uid_t uid)
 		return 0;
 	return 1;
 }
+
+#ifdef __ANDROID__
+/* NOTE getsid syscall wrapper is not included in
+ * some versions of bionic C-library!
+ */
+#include <sys/syscall.h>
+
+static inline pid_t
+android_getsid(pid_t pid) {
+	return syscall(__NR_getsid, pid);
+}
+
+# define getsid android_getsid
+
+#endif /*def __ANDROID__*/
 
 /* returns 1 if process is already daemonized, 0 otherwise */
 int

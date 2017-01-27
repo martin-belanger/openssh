@@ -10,6 +10,29 @@
  * software must be clearly marked as such, and if the derived work is
  * incompatible with the protocol description in the RFC file, it must be
  * called by a name other than "ssh" or "Secure Shell".
+ *
+ * X.509 certificates support,
+ * Copyright (c) 2005 Roumen Petrov.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "includes.h"
@@ -22,6 +45,7 @@
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include "openbsd-compat/openssl-compat.h"
+#include "evp-compat.h"
 #endif
 
 #include <errno.h>
@@ -52,6 +76,7 @@
 #include "dns.h"
 #include "ssh.h"
 #include "ssh2.h"
+#include "ssh-xkalg.h"
 #include "ssherr.h"
 #include "ssh-pkcs11.h"
 #include "atomicio.h"
@@ -481,13 +506,25 @@ do_convert_private_ssh2_from_blob(u_char *blob, u_int blen)
 
 	switch (key->type) {
 	case KEY_DSA:
-		buffer_get_bignum_bits(b, key->dsa->p);
-		buffer_get_bignum_bits(b, key->dsa->g);
-		buffer_get_bignum_bits(b, key->dsa->q);
-		buffer_get_bignum_bits(b, key->dsa->pub_key);
-		buffer_get_bignum_bits(b, key->dsa->priv_key);
+		{
+		BIGNUM *p = NULL, *q = NULL, *g = NULL;
+		BIGNUM *pub_key = NULL, *priv_key = NULL;
+
+		DSA_get0_pqg(key->dsa, (const BIGNUM**)&p, (const BIGNUM**)&q, (const BIGNUM**)&g);
+		DSA_get0_key(key->dsa, (const BIGNUM**)&pub_key, (const BIGNUM**)&priv_key);
+
+		buffer_get_bignum_bits(b, p);
+		buffer_get_bignum_bits(b, g);
+		buffer_get_bignum_bits(b, q);
+		buffer_get_bignum_bits(b, pub_key);
+		buffer_get_bignum_bits(b, priv_key);
+		}
 		break;
 	case KEY_RSA:
+		{
+		BIGNUM *n = NULL, *rsa_e = NULL, *d = NULL;
+		BIGNUM *iqmp = NULL, *p = NULL, *q = NULL;
+
 		if ((r = sshbuf_get_u8(b, &e1)) != 0 ||
 		    (e1 < 30 && (r = sshbuf_get_u8(b, &e2)) != 0) ||
 		    (e1 < 30 && (r = sshbuf_get_u8(b, &e3)) != 0))
@@ -502,18 +539,23 @@ do_convert_private_ssh2_from_blob(u_char *blob, u_int blen)
 			e += e3;
 			debug("e %lx", e);
 		}
-		if (!BN_set_word(key->rsa->e, e)) {
+		RSA_get0_key(key->rsa, (const BIGNUM**)&n, (const BIGNUM**)&rsa_e, (const BIGNUM**)&d);
+		if (!BN_set_word(rsa_e, e)) {
 			sshbuf_free(b);
 			sshkey_free(key);
 			return NULL;
 		}
-		buffer_get_bignum_bits(b, key->rsa->d);
-		buffer_get_bignum_bits(b, key->rsa->n);
-		buffer_get_bignum_bits(b, key->rsa->iqmp);
-		buffer_get_bignum_bits(b, key->rsa->q);
-		buffer_get_bignum_bits(b, key->rsa->p);
+		RSA_get0_crt_params(key->rsa, NULL, NULL, (const BIGNUM**)&iqmp);
+		RSA_get0_factors(key->rsa, (const BIGNUM**)&p, (const BIGNUM**)&q);
+
+		buffer_get_bignum_bits(b, d);
+		buffer_get_bignum_bits(b, n);
+		buffer_get_bignum_bits(b, iqmp);
+		buffer_get_bignum_bits(b, q);
+		buffer_get_bignum_bits(b, p);
 		if ((r = rsa_generate_additional_parameters(key->rsa)) != 0)
 			fatal("generate RSA parameters failed: %s", ssh_err(r));
+		}
 		break;
 	}
 	rlen = sshbuf_len(b);
@@ -621,7 +663,7 @@ do_convert_from_pkcs8(struct sshkey **k, int *private)
 		    identity_file);
 	}
 	fclose(fp);
-	switch (EVP_PKEY_type(pubkey->type)) {
+	switch (EVP_PKEY_id(pubkey)) {
 	case EVP_PKEY_RSA:
 		if ((*k = sshkey_new(KEY_UNSPEC)) == NULL)
 			fatal("sshkey_new failed");
@@ -645,7 +687,7 @@ do_convert_from_pkcs8(struct sshkey **k, int *private)
 #endif
 	default:
 		fatal("%s: unsupported pubkey type %d", __func__,
-		    EVP_PKEY_type(pubkey->type));
+		    EVP_PKEY_id(pubkey));
 	}
 	EVP_PKEY_free(pubkey);
 	return;
@@ -1592,6 +1634,13 @@ do_ca_sign(struct passwd *pw, int argc, char **argv)
 	pkcs11_init(1);
 #endif
 	tmp = tilde_expand_filename(ca_key_path, pw->pw_uid);
+
+	/* NOTE ca_sing is not applicable with X.509 certificate
+	 * support. If USE_LEGACY_PKCS11_RSAKEY is defined in
+	 * ssh-pkcs11.c comment next line
+	 */
+	pkcs11provider = NULL;
+
 	if (pkcs11provider != NULL) {
 		if ((ca = load_pkcs11_key(tmp)) == NULL)
 			fatal("No PKCS#11 key matching %s found", ca_key_path);
@@ -2273,9 +2322,8 @@ main(int argc, char **argv)
 
 	__progname = ssh_get_progname(argv[0]);
 
-#ifdef WITH_OPENSSL
-	OpenSSL_add_all_algorithms();
-#endif
+	ssh_OpenSSL_startup();
+	fill_default_xkalg();
 	log_init(argv[0], SYSLOG_LEVEL_INFO, SYSLOG_FACILITY_USER, 1);
 
 	seed_rng();
@@ -2495,6 +2543,13 @@ main(int argc, char **argv)
 			usage();
 		}
 	}
+
+#ifdef OPENSSL_FIPS
+	if (FIPS_mode() && use_new_format) {
+		fprintf(stderr, "'New format' is not allowed in FIPS mode");
+		exit(1);
+	}
+#endif
 
 	/* reinit */
 	log_init(argv[0], log_level, SYSLOG_FACILITY_USER, 1);

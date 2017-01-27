@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 
 #include <openssl/bn.h>
+#include "evp-compat.h"
 
 #include <errno.h>
 #include <stdarg.h>
@@ -91,13 +92,15 @@ try_agent_authentication(void)
 		goto out;
 	}
 	for (i = 0; i < idlist->nkeys; i++) {
+		const BIGNUM *n = NULL;
 		/* Try this identity. */
 		debug("Trying RSA authentication via agent with '%.100s'",
 		    idlist->comments[i]);
 
 		/* Tell the server that we are willing to authenticate using this key. */
 		packet_start(SSH_CMSG_AUTH_RSA);
-		packet_put_bignum(idlist->keys[i]->rsa->n);
+		RSA_get0_key(idlist->keys[i]->rsa, &n, NULL, NULL);
+		packet_put_bignum(n);
 		packet_send();
 		packet_write_wait();
 
@@ -232,7 +235,11 @@ try_rsa_authentication(int idx)
 
 	/* Tell the server that we are willing to authenticate using this key. */
 	packet_start(SSH_CMSG_AUTH_RSA);
-	packet_put_bignum(public->rsa->n);
+	{
+	const BIGNUM *n = NULL;
+	RSA_get0_key(public->rsa, &n, NULL, NULL);
+	packet_put_bignum(n);
+	}
 	packet_send();
 	packet_write_wait();
 
@@ -354,9 +361,13 @@ try_rhosts_rsa_authentication(const char *local_user, Key * host_key)
 	/* Tell the server that we are willing to authenticate using this key. */
 	packet_start(SSH_CMSG_AUTH_RHOSTS_RSA);
 	packet_put_cstring(local_user);
-	packet_put_int(BN_num_bits(host_key->rsa->n));
-	packet_put_bignum(host_key->rsa->e);
-	packet_put_bignum(host_key->rsa->n);
+	{
+	const BIGNUM *n = NULL, *e = NULL;
+	RSA_get0_key(host_key->rsa, &n, &e, NULL);
+	packet_put_int(BN_num_bits(n));
+	packet_put_bignum(e);
+	packet_put_bignum(n);
+	}
 	packet_send();
 	packet_write_wait();
 
@@ -509,6 +520,8 @@ ssh_kex(char *host, struct sockaddr *hostaddr)
 	u_char cookie[8];
 	u_int supported_ciphers;
 	u_int server_flags, client_flags;
+	BIGNUM *sn = NULL, *se = NULL;
+	BIGNUM *hn = NULL, *he = NULL;
 
 	debug("Waiting for server public key.");
 
@@ -522,10 +535,12 @@ ssh_kex(char *host, struct sockaddr *hostaddr)
 	/* Get the public key. */
 	server_key = key_new(KEY_RSA1);
 	bits = packet_get_int();
-	packet_get_bignum(server_key->rsa->e);
-	packet_get_bignum(server_key->rsa->n);
 
-	rbits = BN_num_bits(server_key->rsa->n);
+	RSA_get0_key(server_key->rsa, (const BIGNUM**)&sn, (const BIGNUM**)&se, NULL);
+	packet_get_bignum(se);
+	packet_get_bignum(sn);
+
+	rbits = BN_num_bits(sn);
 	if (bits != rbits) {
 		logit("Warning: Server lies about size of server public key: "
 		    "actual size is %d bits vs. announced %d.", rbits, bits);
@@ -534,10 +549,11 @@ ssh_kex(char *host, struct sockaddr *hostaddr)
 	/* Get the host key. */
 	host_key = key_new(KEY_RSA1);
 	bits = packet_get_int();
-	packet_get_bignum(host_key->rsa->e);
-	packet_get_bignum(host_key->rsa->n);
+	RSA_get0_key(host_key->rsa, (const BIGNUM**)&hn, (const BIGNUM**)&he, NULL);
+	packet_get_bignum(he);
+	packet_get_bignum(hn);
 
-	rbits = BN_num_bits(host_key->rsa->n);
+	rbits = BN_num_bits(hn);
 	if (bits != rbits) {
 		logit("Warning: Server lies about size of server host key: "
 		    "actual size is %d bits vs. announced %d.", rbits, bits);
@@ -553,14 +569,14 @@ ssh_kex(char *host, struct sockaddr *hostaddr)
 	packet_check_eom();
 
 	debug("Received server public key (%d bits) and host key (%d bits).",
-	    BN_num_bits(server_key->rsa->n), BN_num_bits(host_key->rsa->n));
+	    BN_num_bits(sn), BN_num_bits(hn));
 
 	if (verify_host_key(host, hostaddr, host_key) == -1)
 		fatal("Host key verification failed.");
 
 	client_flags = SSH_PROTOFLAG_SCREEN_NUMBER | SSH_PROTOFLAG_HOST_IN_FWD_OPEN;
 
-	derive_ssh1_session_id(host_key->rsa->n, server_key->rsa->n, cookie, session_id);
+	derive_ssh1_session_id(hn, sn, cookie, session_id);
 
 	/*
 	 * Generate an encryption key for the session.   The key is a 256 bit
@@ -595,14 +611,14 @@ ssh_kex(char *host, struct sockaddr *hostaddr)
 	 * Encrypt the integer using the public key and host key of the
 	 * server (key with smaller modulus first).
 	 */
-	if (BN_cmp(server_key->rsa->n, host_key->rsa->n) < 0) {
+	if (BN_cmp(sn, hn) < 0) {
 		/* Public key has smaller modulus. */
-		if (BN_num_bits(host_key->rsa->n) <
-		    BN_num_bits(server_key->rsa->n) + SSH_KEY_BITS_RESERVED) {
+		if (BN_num_bits(hn) <
+		    BN_num_bits(sn) + SSH_KEY_BITS_RESERVED) {
 			fatal("respond_to_rsa_challenge: host_key %d < server_key %d + "
 			    "SSH_KEY_BITS_RESERVED %d",
-			    BN_num_bits(host_key->rsa->n),
-			    BN_num_bits(server_key->rsa->n),
+			    BN_num_bits(hn),
+			    BN_num_bits(sn),
 			    SSH_KEY_BITS_RESERVED);
 		}
 		if (rsa_public_encrypt(key, key, server_key->rsa) != 0 ||
@@ -610,12 +626,12 @@ ssh_kex(char *host, struct sockaddr *hostaddr)
 			fatal("%s: rsa_public_encrypt failed", __func__);
 	} else {
 		/* Host key has smaller modulus (or they are equal). */
-		if (BN_num_bits(server_key->rsa->n) <
-		    BN_num_bits(host_key->rsa->n) + SSH_KEY_BITS_RESERVED) {
+		if (BN_num_bits(sn) <
+		    BN_num_bits(hn) + SSH_KEY_BITS_RESERVED) {
 			fatal("respond_to_rsa_challenge: server_key %d < host_key %d + "
 			    "SSH_KEY_BITS_RESERVED %d",
-			    BN_num_bits(server_key->rsa->n),
-			    BN_num_bits(host_key->rsa->n),
+			    BN_num_bits(sn),
+			    BN_num_bits(hn),
 			    SSH_KEY_BITS_RESERVED);
 		}
 		if (rsa_public_encrypt(key, key, host_key->rsa) != 0 ||

@@ -1,6 +1,8 @@
 /* $OpenBSD: authfile.c,v 1.122 2016/11/25 23:24:45 djm Exp $ */
 /*
  * Copyright (c) 2000, 2013 Markus Friedl.  All rights reserved.
+ * X509 certificate support,
+ * Copyright (c) 2002-2006,2011,2012 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -46,6 +48,8 @@
 #include "misc.h"
 #include "atomicio.h"
 #include "sshkey.h"
+#include "ssh-x509.h"
+#include "key-eng.h"
 #include "sshbuf.h"
 #include "ssherr.h"
 #include "krl.h"
@@ -164,6 +168,10 @@ sshkey_load_public_rsa1(int fd, struct sshkey **keyp, char **commentp)
 	if (commentp != NULL)
 		*commentp = NULL;
 
+#ifdef OPENSSL_FIPS
+	if (FIPS_mode()) return SSH_ERR_INVALID_FORMAT;
+#endif
+
 	if ((b = sshbuf_new()) == NULL)
 		return SSH_ERR_ALLOC_FAIL;
 	if ((r = sshkey_load_file(fd, b)) != 0)
@@ -213,10 +221,21 @@ sshkey_load_private_type(int type, const char *filename, const char *passphrase,
 {
 	int fd, r;
 
+	debug3("%s() type=%d, filename=%s", __func__, type, (filename ? filename : "?!?"));
 	if (keyp != NULL)
 		*keyp = NULL;
 	if (commentp != NULL)
 		*commentp = NULL;
+
+#ifdef USE_OPENSSL_ENGINE
+	if (strncmp(filename, "engine:", 7) == 0) {
+		r = eng_key_load_private_type(type, filename + 7,
+			passphrase, keyp, commentp);
+		if (perm_ok != NULL)
+			*perm_ok = (r == SSH_ERR_SUCCESS) ? 1 : 0;
+		return r;
+	}
+#endif
 
 	if ((fd = open(filename, O_RDONLY)) < 0) {
 		if (perm_ok != NULL)
@@ -309,6 +328,13 @@ sshkey_try_load_public(struct sshkey *k, const char *filename, char **commentp)
 
 	if (commentp != NULL)
 		*commentp = NULL;
+
+#ifdef USE_OPENSSL_ENGINE
+	if (strncmp(filename, "engine:", 7) == 0) {
+		return eng_key_try_load_public(k, filename + 7, commentp);
+	}
+#endif
+
 	if ((f = fopen(filename, "r")) == NULL)
 		return SSH_ERR_SYSTEM_ERROR;
 	while (read_keyfile_line(f, filename, line, sizeof(line),
@@ -328,7 +354,8 @@ sshkey_try_load_public(struct sshkey *k, const char *filename, char **commentp)
 		for (; *cp && (*cp == ' ' || *cp == '\t'); cp++)
 			;
 		if (*cp) {
-			if ((r = sshkey_read(k, &cp)) == 0) {
+			char *pkalg = NULL;
+			if ((r = sshkey_read_pkalg(k, &cp, &pkalg)) == 0) {
 				cp[strcspn(cp, "\r\n")] = '\0';
 				if (commentp) {
 					*commentp = strdup(*cp ?
@@ -337,6 +364,11 @@ sshkey_try_load_public(struct sshkey *k, const char *filename, char **commentp)
 						r = SSH_ERR_ALLOC_FAIL;
 				}
 				fclose(f);
+				if (pkalg) {
+					/* load extra certificates for RFC6187 keys */
+					x509key_load_certs(pkalg, k, filename);
+					free(pkalg);
+				}
 				return r;
 			}
 		}
@@ -360,10 +392,16 @@ sshkey_load_public(const char *filename, struct sshkey **keyp, char **commentp)
 
 	/* XXX should load file once and attempt to parse each format */
 
+	debug3("%s() filename=%s", __func__, (filename ? filename : "?!?"));
 	if ((fd = open(filename, O_RDONLY)) < 0)
 		goto skip;
 #ifdef WITH_SSH1
 	/* try rsa1 private key */
+#ifdef OPENSSL_FIPS
+	if (FIPS_mode()) {
+		debug3("FIPS mode - skip attempt to load protocol 1 identity");
+	} else {
+#endif
 	r = sshkey_load_public_rsa1(fd, keyp, commentp);
 	close(fd);
 	switch (r) {
@@ -374,6 +412,9 @@ sshkey_load_public(const char *filename, struct sshkey **keyp, char **commentp)
 	case 0:
 		return r;
 	}
+#ifdef OPENSSL_FIPS
+	}
+#endif
 #else /* WITH_SSH1 */
 	close(fd);
 #endif /* WITH_SSH1 */
@@ -390,6 +431,9 @@ sshkey_load_public(const char *filename, struct sshkey **keyp, char **commentp)
 
 #ifdef WITH_SSH1
 	/* try rsa1 public key */
+#ifdef OPENSSL_FIPS
+	if (!FIPS_mode()) {
+#endif
 	if ((pub = sshkey_new(KEY_RSA1)) == NULL)
 		return SSH_ERR_ALLOC_FAIL;
 	if ((r = sshkey_try_load_public(pub, filename, commentp)) == 0) {
@@ -398,6 +442,9 @@ sshkey_load_public(const char *filename, struct sshkey **keyp, char **commentp)
 		return 0;
 	}
 	sshkey_free(pub);
+#ifdef OPENSSL_FIPS
+	}
+#endif
 #endif /* WITH_SSH1 */
 
  skip:
@@ -425,6 +472,7 @@ sshkey_load_cert(const char *filename, struct sshkey **keyp)
 	char *file = NULL;
 	int r = SSH_ERR_INTERNAL_ERROR;
 
+	debug3("%s() filename=%s", __func__, (filename ? filename : "?!?"));
 	if (keyp != NULL)
 		*keyp = NULL;
 
@@ -456,6 +504,7 @@ sshkey_load_private_cert(int type, const char *filename, const char *passphrase,
 	struct sshkey *key = NULL, *cert = NULL;
 	int r;
 
+	debug3("%s() type=%d, filename=%s", __func__, type, (filename ? filename : "?!?"));
 	if (keyp != NULL)
 		*keyp = NULL;
 

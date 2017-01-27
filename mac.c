@@ -1,6 +1,7 @@
 /* $OpenBSD: mac.c,v 1.33 2016/07/08 03:44:42 djm Exp $ */
 /*
  * Copyright (c) 2001 Markus Friedl.  All rights reserved.
+ * Copyright (c) 2011-2014 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -35,6 +36,8 @@
 #include "umac.h"
 #include "mac.h"
 #include "misc.h"
+#include "xmalloc.h"
+#include "log.h"
 #include "ssherr.h"
 #include "sshbuf.h"
 
@@ -89,6 +92,19 @@ static const struct macalg macs[] = {
 	{ NULL,					0, 0, 0, 0, 0, 0 }
 };
 
+static inline int/*bool*/
+macalg_allowed(const struct macalg *m) {
+#ifdef OPENSSL_FIPS
+	if (FIPS_mode()) {
+		if (m->type != SSH_DIGEST)
+			return(0);
+		if (ssh_digest_bytes(m->alg) == 0)
+			return(0);
+	}
+#endif
+	return(1);
+}
+
 /* Returns a list of supported MACs separated by the specified char. */
 char *
 mac_alg_list(char sep)
@@ -98,6 +114,8 @@ mac_alg_list(char sep)
 	const struct macalg *m;
 
 	for (m = macs; m->name != NULL; m++) {
+		if (!macalg_allowed(m))
+			continue;
 		if (ret != NULL)
 			ret[rlen++] = sep;
 		nlen = strlen(m->name);
@@ -138,6 +156,8 @@ mac_setup(struct sshmac *mac, char *name)
 
 	for (m = macs; m->name != NULL; m++) {
 		if (strcmp(name, m->name) != 0)
+			continue;
+		if (!macalg_allowed(m))
 			continue;
 		if (mac != NULL)
 			return mac_setup_by_alg(mac, m);
@@ -270,3 +290,38 @@ mac_valid(const char *names)
 	free(maclist);
 	return 1;
 }
+
+#ifdef OPENSSL_FIPS
+char*
+only_fips_valid_macs(const char* names)
+{
+	Buffer b;
+	char *fips_names, *cp, *p;
+
+	if (names == NULL || *names == '\0')
+		return NULL;
+
+	buffer_init(&b);
+
+	/* default set in myproposals.h */
+	cp = xstrdup(names);
+	for (p = strsep(&cp, MAC_SEP);
+	     p && *p != '\0';
+	     p = strsep(&cp, MAC_SEP)
+	) {
+		if (mac_setup(NULL, p) < 0) continue;
+
+		if (buffer_len(&b) > 0)
+			buffer_append(&b, ",", 1);
+		buffer_append(&b, p, strlen(p));
+	}
+	buffer_append(&b, "\0", 1);
+
+	fips_names = xstrdup(buffer_ptr(&b));
+
+	buffer_free(&b);
+
+	debug3("%s: fips_macs: [%s]", __func__, fips_names);
+	return fips_names;
+}
+#endif /*def OPENSSL_FIPS*/

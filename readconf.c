@@ -10,6 +10,29 @@
  * software must be clearly marked as such, and if the derived work is
  * incompatible with the protocol description in the RFC file, it must be
  * called by a name other than "ssh" or "Secure Shell".
+ *
+ * X509 certificate support,
+ * Copyright (c) 2002-2006,2011 Roumen Petrov.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #include "includes.h"
@@ -62,6 +85,7 @@
 #include "readconf.h"
 #include "match.h"
 #include "kex.h"
+#include "ssh-xkalg.h"
 #include "mac.h"
 #include "uidswap.h"
 #include "myproposal.h"
@@ -141,6 +165,21 @@ static int process_config_line_depth(Options *options, struct passwd *pw,
 
 typedef enum {
 	oBadOption,
+	/* X.509 Standard Options */
+	oHostbasedAlgorithms,
+	oPubkeyAlgorithms,
+	oX509KeyAlgorithm,
+	oAllowedServerCertPurpose,
+	oMandatoryCRL,
+	oCACertificateFile, oCACertificatePath,
+	oCARevocationFile, oCARevocationPath,
+	oCAldapVersion, oCAldapURL,
+	oUserCACertificateFile, oUserCACertificatePath,
+	oUserCARevocationFile, oUserCARevocationPath,
+	oUserCAldapVersion, oUserCAldapURL,
+	oVAType, oVACertificateFile,
+	oVAOCSPResponderURL,
+	/* Standard Options */
 	oHost, oMatch, oInclude,
 	oForwardAgent, oForwardX11, oForwardX11Trusted, oForwardX11Timeout,
 	oGatewayPorts, oExitOnForwardFailure,
@@ -180,6 +219,28 @@ static struct {
 	const char *name;
 	OpCodes opcode;
 } keywords[] = {
+	/* X.509 Standard Options */
+	{ "hostbasedalgorithms", oHostbasedAlgorithms },
+	{ "pubkeyalgorithms", oPubkeyAlgorithms },
+	{ "x509keyalgorithm", oX509KeyAlgorithm },
+	{ "allowedcertpurpose", oAllowedServerCertPurpose },
+	{ "mandatorycrl", oMandatoryCRL },
+	{ "cacertificatefile", oCACertificateFile },
+	{ "cacertificatepath", oCACertificatePath },
+	{ "carevocationfile", oCARevocationFile },
+	{ "carevocationpath", oCARevocationPath },
+	{ "caldapversion", oCAldapVersion },
+	{ "caldapurl", oCAldapURL },
+	{ "usercacertificatefile", oUserCACertificateFile },
+	{ "usercacertificatepath", oUserCACertificatePath },
+	{ "usercarevocationfile", oUserCARevocationFile },
+	{ "usercarevocationpath", oUserCARevocationPath },
+	{ "usercaldapversion", oCAldapVersion },
+	{ "usercaldapurl", oCAldapURL },
+	{ "vatype", oVAType },
+	{ "vacertificatefile", oVACertificateFile },
+	{ "vaocspresponderurl", oVAOCSPResponderURL },
+	/* Standard Options */
 	{ "forwardagent", oForwardAgent },
 	{ "forwardx11", oForwardX11 },
 	{ "forwardx11trusted", oForwardX11Trusted },
@@ -862,6 +923,162 @@ process_config_line_depth(Options *options, struct passwd *pw, const char *host,
 		debug("%s line %d: Ignored unknown option \"%s\"",
 		    filename, linenum, keyword);
 		return 0;
+	/* X.509 Standard Options */
+	case oHostbasedKeyTypes:	/* for compatibility */
+	case oHostbasedAlgorithms:
+		charptr = (char**)&options->hostbased_algorithms;
+		arg = strdelim(&s);
+		if (!arg || *arg == '\0')
+			fatal("%.200s line %d: Missing argument.", filename, linenum);
+		/* cannot validate here - depend from X509KeyAlgorithm */
+		if (*activep && *charptr == NULL)
+			*charptr = xstrdup(arg);
+		break;
+
+	case oPubkeyAcceptedKeyTypes:	/* for compatibility */
+	case oPubkeyAlgorithms:
+		charptr = (char**)&options->pubkey_algorithms;
+		arg = strdelim(&s);
+		if (!arg || *arg == '\0')
+			fatal("%.200s line %d: Missing argument.", filename, linenum);
+		/* cannot validate here - depend from X509KeyAlgorithm */
+		if (*activep && *charptr == NULL)
+			*charptr = xstrdup(arg);
+		break;
+
+	case oX509KeyAlgorithm:
+		arg = strdelim(&s);
+		if (!arg || *arg == '\0')
+			fatal("%.200s line %d: Missing argument.", filename, linenum);
+
+		if (*activep) {
+			if (ssh_add_x509key_alg(arg) < 0) {
+				fatal("%.200s line %d: Bad X.509 key algorithm '%.200s'.",
+				    filename, linenum, arg);
+			}
+		}
+		break;
+
+	case oAllowedServerCertPurpose:
+		intptr = &options->x509flags->allowedcertpurpose;
+		arg = strdelim(&s);
+		if (arg && *arg) {
+			if (strcasecmp(arg, "skip") == 0) goto skip_purpose;
+
+			/* convert string to OpenSSL index */
+			value = ssh_get_x509purpose_s (0, arg);
+			if (value < 0)
+				fatal("%.200s line %d: Bad certificate purpose '%.30s'.",
+				    filename, linenum, arg);
+
+			if (*activep && *intptr == -1)
+				*intptr = value;
+		} else {
+skip_purpose:
+			if (*activep && *intptr == -1) {
+				*intptr = -2;
+				verbose("%.200s line %d: option is set to don`t check certificate purpose.",
+				    filename, linenum);
+			}
+		}
+		break;
+
+#ifndef SSH_X509STORE_DISABLED
+	case oMandatoryCRL:
+		intptr = &options->x509flags->mandatory_crl;
+		goto parse_flag;
+
+	case oCACertificateFile:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.certificate_file;
+		goto parse_string;
+
+	case oCACertificatePath:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.certificate_path;
+		goto parse_string;
+
+	case oCARevocationFile:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.revocation_file;
+		goto parse_string;
+
+	case oCARevocationPath:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.revocation_path;
+		goto parse_string;
+
+	case oUserCACertificateFile:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->userca.certificate_file;
+		goto parse_string;
+
+	case oUserCACertificatePath:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->userca.certificate_path;
+		goto parse_string;
+
+	case oUserCARevocationFile:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->userca.revocation_file;
+		goto parse_string;
+
+	case oUserCARevocationPath:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->userca.revocation_path;
+		goto parse_string;
+#endif /*ndef SSH_X509STORE_DISABLED*/
+
+#ifdef LDAP_ENABLED
+	case oCAldapVersion:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.ldap_ver;
+		goto parse_string;
+
+	case oCAldapURL:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->ca.ldap_url;
+		goto parse_string;
+
+	case oUserCAldapVersion:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->userca.ldap_ver;
+		goto parse_string;
+
+	case oUserCAldapURL:
+		/*X509StoreOptions prefered type is 'const char*' */
+		charptr = (char**)&options->userca.ldap_url;
+		goto parse_string;
+#endif /*def LDAP_ENABLED*/
+
+#ifdef SSH_OCSP_ENABLED
+	case oVAType:
+		intptr = &options->va.type;
+		arg = strdelim(&s);
+		if (!arg || *arg == '\0')
+			fatal("%.200s line %d: Missing argument.", filename, linenum);
+
+		value = ssh_get_vatype_s(arg);
+		if (value < 0) {
+			fatal("%.200s line %d: Bad OCSP responder type '%.30s'.",
+			    filename, linenum, arg);
+		}
+
+		if (*activep && *intptr == -1)
+			*intptr = value;
+		break;
+
+	case oVACertificateFile:
+		/* VAOptions prefered type is 'const char*' */
+		charptr = (char**)&options->va.certificate_file;
+		goto parse_string;
+
+	case oVAOCSPResponderURL:
+		/* VAOptions prefered type is 'const char*' */
+		charptr = (char**)&options->va.responder_url;
+		goto parse_string;
+#endif /*def SSH_OCSP_ENABLED*/
+	/* Other Standard Options */
 	case oConnectTimeout:
 		intptr = &options->connection_timeout;
 parse_time:
@@ -1219,9 +1436,11 @@ parse_keytypes:
 		if (!arg || *arg == '\0')
 			fatal("%.200s line %d: Missing argument.",
 			    filename, linenum);
+#if 0		/* cannot validate here - depend from X509KeyAlgorithm */
 		if (!sshkey_names_valid2(*arg == '+' ? arg + 1 : arg, 1))
 			fatal("%s line %d: Bad key types '%s'.",
 				filename, linenum, arg ? arg : "<NONE>");
+#endif
 		if (*activep && *charptr == NULL)
 			*charptr = xstrdup(arg);
 		break;
@@ -1283,6 +1502,15 @@ parse_keytypes:
 				add_local_forward(options, &fwd);
 			else if (opcode == oRemoteForward)
 				add_remote_forward(options, &fwd);
+		} else {
+			free(fwd.connect_host);
+			fwd.connect_host = NULL;
+			free(fwd.connect_path);
+			fwd.connect_path = NULL;
+			free(fwd.listen_host);
+			fwd.listen_host = NULL;
+			free(fwd.listen_path);
+			fwd.listen_path = NULL;
 		}
 		break;
 
@@ -1639,13 +1867,17 @@ parse_keytypes:
 		multistate_ptr = multistate_yesnoask;
 		goto parse_multistate;
 
+#if 0 /* already defined as oHostbasedAlgorithms */
 	case oHostbasedKeyTypes:
 		charptr = &options->hostbased_key_types;
 		goto parse_keytypes;
+#endif
 
+#if 0 /* already defined as oPubkeyAlgorithms */
 	case oPubkeyAcceptedKeyTypes:
 		charptr = &options->pubkey_key_types;
 		goto parse_keytypes;
+#endif
 
 	case oAddKeysToAgent:
 		intptr = &options->add_keys_to_agent;
@@ -1661,6 +1893,28 @@ parse_keytypes:
 		    filename, linenum, keyword);
 		return 0;
 
+#ifdef SSH_X509STORE_DISABLED
+	case oMandatoryCRL:
+	case oCACertificateFile:
+	case oCACertificatePath:
+	case oCARevocationFile:
+	case oCARevocationPath:
+	case oUserCACertificateFile:
+	case oUserCACertificatePath:
+	case oUserCARevocationFile:
+	case oUserCARevocationPath:
+#endif /*def SSH_X509STORE_DISABLED*/
+#ifndef LDAP_ENABLED
+	case oCAldapVersion:
+	case oCAldapURL:
+	case oUserCAldapVersion:
+	case oUserCAldapURL:
+#endif /*ndef LDAP_ENABLED*/
+#ifndef SSH_OCSP_ENABLED
+	case oVAType:
+	case oVACertificateFile:
+	case oVAOCSPResponderURL:
+#endif /*ndef SSH_OCSP_ENABLED*/
 	case oUnsupported:
 		error("%s line %d: Unsupported option \"%s\"",
 		    filename, linenum, keyword);
@@ -1759,6 +2013,23 @@ void
 initialize_options(Options * options)
 {
 	memset(options, 'X', sizeof(*options));
+	/* X.509 Standard Options */
+	options->hostbased_algorithms = NULL;
+	options->pubkey_algorithms = NULL;
+	/* Supported X.509 key algorithms and signatures
+	   are defined is external source. */
+	options->x509flags = &ssh_x509flags;
+	ssh_x509flags_initialize(options->x509flags, 0);
+#ifndef SSH_X509STORE_DISABLED
+	X509StoreOptions_init(&options->ca);
+	X509StoreOptions_init(&options->userca);
+#endif /*ndef SSH_X509STORE_DISABLED*/
+#ifdef SSH_OCSP_ENABLED
+	options->va.type = -1;
+	options->va.certificate_file = NULL;
+	options->va.responder_url = NULL;
+#endif /*def SSH_OCSP_ENABLED*/
+	/* Standard Options */
 	options->forward_agent = -1;
 	options->forward_x11 = -1;
 	options->forward_x11_trusted = -1;
@@ -1954,6 +2225,15 @@ fill_default_options(Options * options)
 	if (options->cipher == -1)
 		options->cipher = SSH_CIPHER_NOT_SET;
 	/* options->hostkeyalgorithms, default set in myproposals.h */
+	/* HostKeyAlgorithms depend from X509KeyAlgorithm options */
+#ifdef OPENSSL_FIPS
+	if (FIPS_mode()) {
+		if (options->ciphers == NULL)
+			options->ciphers = only_fips_valid_ciphers(KEX_CLIENT_ENCRYPT);
+		if (options->macs == NULL)
+			options->macs = only_fips_valid_macs(KEX_CLIENT_MAC);
+	}
+#endif
 	if (options->protocol == SSH_PROTO_UNKNOWN)
 		options->protocol = SSH_PROTO_2;
 	if (options->add_keys_to_agent == -1)
@@ -2046,11 +2326,7 @@ fill_default_options(Options * options)
 		options->update_hostkeys = 0;
 	if (kex_assemble_names(KEX_CLIENT_ENCRYPT, &options->ciphers) != 0 ||
 	    kex_assemble_names(KEX_CLIENT_MAC, &options->macs) != 0 ||
-	    kex_assemble_names(KEX_CLIENT_KEX, &options->kex_algorithms) != 0 ||
-	    kex_assemble_names(KEX_DEFAULT_PK_ALG,
-	    &options->hostbased_key_types) != 0 ||
-	    kex_assemble_names(KEX_DEFAULT_PK_ALG,
-	    &options->pubkey_key_types) != 0)
+	    kex_assemble_names(KEX_CLIENT_KEX, &options->kex_algorithms) != 0)
 		fatal("%s: kex_assemble_names failed", __func__);
 
 #define CLEAR_ON_NONE(v) \
@@ -2069,6 +2345,59 @@ fill_default_options(Options * options)
 	/* options->hostname will be set in the main program if appropriate */
 	/* options->host_key_alias should not be set by default */
 	/* options->preferred_authentications will be set in ssh */
+
+	/* options->hostbased_algorithms */
+	/* options->pubkey_algorithms */
+	fill_default_xkalg();
+	ssh_x509flags_defaults(options->x509flags);
+#ifndef SSH_X509STORE_DISABLED
+	X509StoreOptions_system_defaults(&options->ca);
+
+	{
+		extern uid_t original_real_uid;
+		X509StoreOptions_user_defaults(&options->userca, original_real_uid);
+	}
+
+	(void)ssh_x509store_addlocations(&options->userca);
+	(void)ssh_x509store_addlocations(&options->ca);
+#endif /*ndef SSH_X509STORE_DISABLED*/
+#ifdef SSH_OCSP_ENABLED
+	if (options->va.type == -1)
+		options->va.type = ssh_get_default_vatype();
+	ssh_set_validator(&options->va);
+#endif /*def SSH_OCSP_ENABLED*/
+
+	if (options->hostkeyalgorithms != NULL) {
+		char *alg = options->hostkeyalgorithms;
+		if (*alg == '+') alg++;
+		if (!sshkey_names_valid2(alg, 1))
+			fatal("Bad protocol 2 hostkey algorithms '%s'.",
+			    options->hostkeyalgorithms);
+	}
+{	/* see use of hostkeyalgorithms in sshconnect2.c */
+	char *p = default_publickey_algorithms();
+
+	if (kex_assemble_names(p, &options->hostkeyalgorithms) != 0)
+		fatal("%s: kex_assemble_names failed", __func__);
+
+	free(p);
+}
+
+	if (options->hostbased_algorithms != NULL) {
+		if (!sshkey_names_valid2(options->hostbased_algorithms, 1))
+			fatal("Bad protocol 2 hostbased key algorithms '%s'.",
+			    options->hostbased_algorithms);
+	} else
+		options->hostbased_algorithms = xstrdup("*");
+	options->hostbased_key_types = xstrdup(options->hostbased_algorithms); /* for compatibility */
+
+	if (options->pubkey_algorithms != NULL) {
+		if (!sshkey_names_valid2(options->pubkey_algorithms, 1))
+			fatal("Bad protocol 2 public key algorithms '%s'.",
+			    options->pubkey_algorithms);
+	} else
+		options->pubkey_algorithms = xstrdup("*");
+	options->pubkey_key_types = xstrdup(options->pubkey_algorithms); /* for compatibility */
 }
 
 struct fwdarg {
@@ -2280,6 +2609,50 @@ parse_forward(struct Forward *fwd, const char *fwdspec, int dynamicfwd, int remo
 	return (0);
 }
 
+#ifdef USE_OPENSSL_ENGINE
+/*
+ * Reads the endgine config file and execute commands accordingly.
+ * If the file does not exist, this returns 0.
+ */
+int/*bool*/
+process_engconfig_file(const char *filename) {
+	FILE *f;
+	char line[1024];
+	int linenum;
+	int flag = 1;
+
+	f = fopen(filename, "r");
+	if (f == NULL)
+		return(0);
+
+	{/*always check permitions of user engine file*/
+		struct stat sb;
+
+		if (fstat(fileno(f), &sb) == -1)
+			fatal("fstat %s: %s", filename, strerror(errno));
+		if (((sb.st_uid != 0 && sb.st_uid != getuid()) ||
+		    (sb.st_mode & 022) != 0))
+			fatal("Bad owner or permissions on %s", filename);
+	}
+
+	debug("Reading engines configuration options %.200s", filename);
+
+	linenum = 0;
+	while (fgets(line, sizeof(line), f)) {
+		linenum++;
+		flag = process_engconfig_line(line, filename, linenum);
+		if (!flag)
+			break;
+	}
+
+	fclose(f);
+	if (!flag)
+		fatal("%s: terminating, bad engine option on line %d",
+		    filename, linenum);
+	return(flag);
+}
+#endif /*def USE_OPENSSL_ENGINE*/
+
 int
 parse_jump(const char *s, Options *o, int active)
 {
@@ -2347,6 +2720,10 @@ fmt_intarg(OpCodes code, int val)
 	if (val == -1)
 		return "unset";
 	switch (code) {
+#ifdef SSH_OCSP_ENABLED
+	case oVAType:
+		return ssh_get_vatype_i(val);
+#endif
 	case oAddressFamily:
 		return fmt_multistate_int(val, multistate_addressfamily);
 	case oVerifyHostKeyDNS:
@@ -2481,14 +2858,34 @@ dump_client_config(Options *o, const char *host)
 	int i;
 	char buf[8];
 
-	/* This is normally prepared in ssh_kex2 */
-	if (kex_assemble_names(KEX_DEFAULT_PK_ALG, &o->hostkeyalgorithms) != 0)
-		fatal("%s: kex_assemble_names failed", __func__);
-
 	/* Most interesting options first: user, host, port */
 	dump_cfg_string(oUser, o->user);
 	dump_cfg_string(oHostName, host);
 	dump_cfg_int(oPort, o->port);
+
+	/* X.509 options */
+	dump_cfg_string(oHostbasedAlgorithms, o->hostbased_algorithms);
+	dump_cfg_string(oPubkeyAlgorithms, o->pubkey_algorithms);
+	/* TODO to implement dump of sX509KeyAlgorithm */
+	/* sshd PKI(X509) flags */
+#ifndef SSH_X509STORE_DISABLED
+	/* sshd PKI(X509) system store */
+	dump_cfg_string(oCACertificateFile, o->ca.certificate_file);
+	dump_cfg_string(oCACertificatePath, o->ca.certificate_path);
+	dump_cfg_string(oCARevocationFile , o->ca.revocation_file );
+	dump_cfg_string(oCARevocationPath , o->ca.revocation_path );
+	/* sshd PKI(X509) user store */
+	dump_cfg_string(oUserCACertificateFile, o->userca.certificate_file);
+	dump_cfg_string(oUserCACertificatePath, o->userca.certificate_path);
+	dump_cfg_string(oUserCARevocationFile , o->userca.revocation_file );
+	dump_cfg_string(oUserCARevocationPath , o->userca.revocation_path );
+#endif /*ndef SSH_X509STORE_DISABLED*/
+#ifdef SSH_OCSP_ENABLED
+	/* ssh X.509 extra validation */
+	dump_cfg_fmtint(oVAType		   , o->va.type		   );
+	dump_cfg_string(oVACertificateFile , o->va.certificate_file);
+	dump_cfg_string(oVAOCSPResponderURL, o->va.responder_url   );
+#endif /*def SSH_OCSP_ENABLED*/
 
 	/* Flag options */
 	dump_cfg_fmtint(oAddressFamily, o->address_family);
@@ -2548,7 +2945,6 @@ dump_client_config(Options *o, const char *host)
 	dump_cfg_string(oControlPath, o->control_path);
 	dump_cfg_string(oHostKeyAlgorithms, o->hostkeyalgorithms);
 	dump_cfg_string(oHostKeyAlias, o->host_key_alias);
-	dump_cfg_string(oHostbasedKeyTypes, o->hostbased_key_types);
 	dump_cfg_string(oIdentityAgent, o->identity_agent);
 	dump_cfg_string(oKbdInteractiveDevices, o->kbd_interactive_devices);
 	dump_cfg_string(oKexAlgorithms, o->kex_algorithms ? o->kex_algorithms : KEX_CLIENT_KEX);
@@ -2557,7 +2953,6 @@ dump_client_config(Options *o, const char *host)
 	dump_cfg_string(oMacs, o->macs ? o->macs : KEX_CLIENT_MAC);
 	dump_cfg_string(oPKCS11Provider, o->pkcs11_provider);
 	dump_cfg_string(oPreferredAuthentications, o->preferred_authentications);
-	dump_cfg_string(oPubkeyAcceptedKeyTypes, o->pubkey_key_types);
 	dump_cfg_string(oRevokedHostKeys, o->revoked_host_keys);
 	dump_cfg_string(oXAuthLocation, o->xauth_location);
 

@@ -1,6 +1,8 @@
-/* $OpenBSD: auth2-pubkey.c,v 1.61 2016/12/30 22:08:02 djm Exp $ */
+/* $OpenBSD: auth2-pubkey.c,v 1.60 2016/11/30 02:57:40 djm Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
+ * X.509 certificates support,
+ * Copyright (c) 2003-2006,2012-2016 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -53,6 +55,7 @@
 #include "servconf.h"
 #include "compat.h"
 #include "key.h"
+#include "ssh-x509.h"
 #include "hostfile.h"
 #include "auth.h"
 #include "pathnames.h"
@@ -73,6 +76,8 @@
 extern ServerOptions options;
 extern u_char *session_id2;
 extern u_int session_id2_len;
+
+static int pubkey_algorithm_allowed(const char* pkalg);
 
 static int
 userauth_pubkey(Authctxt *authctxt)
@@ -110,7 +115,12 @@ userauth_pubkey(Authctxt *authctxt)
 		    __func__, pkalg);
 		goto done;
 	}
-	key = key_from_blob(pkblob, blen);
+	if (!pubkey_algorithm_allowed(pkalg)) {
+		debug("userauth_pubkey: disallowed public key algorithm: %s",
+		    pkalg);
+		goto done;
+	}
+	key = xkey_from_blob(pkalg, pkblob, blen);
 	if (key == NULL) {
 		error("%s: cannot decode key: %s", __func__, pkalg);
 		goto done;
@@ -129,12 +139,6 @@ userauth_pubkey(Authctxt *authctxt)
 	fp = sshkey_fingerprint(key, options.fingerprint_hash, SSH_FP_DEFAULT);
 	if (auth2_userkey_already_used(authctxt, key)) {
 		logit("refusing previously-used %s key", key_type(key));
-		goto done;
-	}
-	if (match_pattern_list(sshkey_ssh_name(key),
-	    options.pubkey_key_types, 0) != 1) {
-		logit("%s: key type %s not in PubkeyAcceptedKeyTypes",
-		    __func__, sshkey_ssh_name(key));
 		goto done;
 	}
 
@@ -624,6 +628,108 @@ match_principals_file(char *file, struct passwd *pw, struct sshkey_cert *cert)
 	return success;
 }
 
+/* return 1 if given publickey algorithm is allowed */
+static int
+pubkey_algorithm_allowed(const char* pkalg)
+{
+	if (options.pubkey_algorithms == NULL) return(1);
+
+	return(match_pattern_list(pkalg, options.pubkey_algorithms, 0) == 1);
+}
+
+static int
+key_match(const Key *key, const Key *found) {
+	/* key always has X.509 identity - see user_key_allowed2 */
+	if (found == NULL)
+		return(0);
+
+	if (key->type == found->type) {
+#ifdef SSH_X509STORE_DISABLED
+		return(key_equal(key, found));
+#else /*ndef SSH_X509STORE_DISABLED*/
+		if (!key_equal(key, found))
+			return(0);
+
+		/*
+		 * Key are equal but in case of certificates
+		 * when x509store is enabled found key may
+		 * contain only distinguished name.
+		 */
+		if (!key_is_x509(found))
+			return(1);
+
+		debug3("key_match:found matching certificate");
+		if (!ssh_x509flags.key_allow_selfissued) {
+			/*
+			 * Only the verification process can
+			 * allow the received certificate.
+			 */
+			return(1);
+		}
+
+		/*
+		 * The public key or certificate found in
+		 * autorized keys file can allow self-issued.
+		 */
+		{
+			X509 *x = SSH_X509_get_cert(key->x509_data);
+			if (!ssh_X509_is_selfsigned(x))
+				return(1);
+		}
+
+		/* the certificate can be allowed by public key */
+#endif /*ndef SSH_X509STORE_DISABLED*/
+	}
+
+	switch(X509KEY_BASETYPE(found)) {
+	case KEY_RSA: {
+		debug3("key_match:RSA");
+		return sshrsa_equal_public(key->rsa, found->rsa);
+		} break;
+	case KEY_DSA: {
+		debug3("key_match:DSA");
+		return sshdsa_equal_public(key->dsa, found->dsa);
+		} break;
+#ifdef OPENSSL_HAS_ECC
+	case KEY_ECDSA: {
+		BN_CTX *bnctx;
+
+		debug3("key_match:EC");
+		if (key->ecdsa == NULL ||
+		    found->ecdsa == NULL ||
+		    EC_KEY_get0_public_key(key->ecdsa) == NULL ||
+		    EC_KEY_get0_public_key(found->ecdsa) == NULL
+		)
+			return(0);
+
+		bnctx = BN_CTX_new();
+		if (bnctx == NULL)
+			fatal("key_match: BN_CTX_new failed");
+
+		if (EC_GROUP_cmp(
+			EC_KEY_get0_group(key->ecdsa),
+			EC_KEY_get0_group(found->ecdsa),
+			bnctx
+		    ) != 0 ||
+		    EC_POINT_cmp(
+			EC_KEY_get0_group(key->ecdsa),
+			EC_KEY_get0_public_key(key->ecdsa),
+			EC_KEY_get0_public_key(found->ecdsa),
+			bnctx
+		    ) != 0
+		) {
+			BN_CTX_free(bnctx);
+			return(0);
+		}
+
+		BN_CTX_free(bnctx);
+		return(1);
+		} break;
+#endif /* OPENSSL_HAS_ECC */
+	}
+	return(0);
+}
+
 /*
  * Checks whether principal is allowed in output of command.
  * returns 1 if the principal is allowed or 0 otherwise.
@@ -727,9 +833,6 @@ match_principals_command(struct passwd *user_pw, const struct sshkey *key)
 
 	ok = process_principals(f, NULL, pw, cert);
 
-	fclose(f);
-	f = NULL;
-
 	if (exited_cleanly(pid, "AuthorizedPrincipalsCommand", command) != 0)
 		goto out;
 
@@ -773,7 +876,7 @@ check_authkeys_file(FILE *f, char *file, Key* key, struct passwd *pw)
 
 		if (found != NULL)
 			key_free(found);
-		found = key_new(key_is_cert(key) ? KEY_UNSPEC : key->type);
+		found = key_new(key_is_cert(key) || key_is_x509(key) ? KEY_UNSPEC : key->type);
 		auth_clear_options();
 
 		/* Skip leading whitespace, empty and comment lines. */
@@ -843,6 +946,33 @@ check_authkeys_file(FILE *f, char *file, Key* key, struct passwd *pw)
 			    key_type(found), fp, file);
 			free(fp);
 			found_key = 1;
+			break;
+		} else if (key_is_x509(key)) {
+			/* Variable key always contain public key or
+			 * certificate. In case of X.509 certificate
+			 * x509 attribute of Key structure "found"
+			 * may contain only "Distinguished Name" !
+			 */
+			if (!key_match(key, found))
+				continue;
+			debug("matching key found: file %s, line %lu",
+			    file, linenum);
+			if (auth_parse_options(pw, key_options, file,
+			    linenum) != 1)
+				continue;
+			found_key = 1;
+			fp = key_is_x509(found)
+				? x509key_subject(found)
+				: sshkey_fingerprint(found, options.fingerprint_hash,
+				    SSH_FP_DEFAULT);
+			if (fp == NULL)
+				continue;
+			verbose("Authorized by %s : %s", key_type(found), fp);
+			if (ssh_x509key_verify_cert(key) != 1) {
+				found_key = 0;
+				verbose("X.509 certificate validation reject key");
+			}
+			free(fp);
 			break;
 		} else if (key_equal(found, key)) {
 			if (auth_parse_options(pw, key_options, file,
@@ -1052,9 +1182,6 @@ user_key_command_allowed2(struct passwd *user_pw, Key *key)
 	temporarily_use_uid(pw);
 
 	ok = check_authkeys_file(f, options.authorized_keys_command, key, pw);
-
-	fclose(f);
-	f = NULL;
 
 	if (exited_cleanly(pid, "AuthorizedKeysCommand", command) != 0)
 		goto out;

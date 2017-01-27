@@ -15,7 +15,7 @@ rm $OBJ/known_hosts
 trace "prepare hostkeys"
 nkeys=0
 all_algs=""
-for k in `${SSH} -Q key-plain` ; do
+for k in `${SSH} -Q key-plain | grep -v "^x509v3-"` ; do
 	${SSHKEYGEN} -qt $k -f $OBJ/hkr.$k -N '' || fatal "ssh-keygen $k"
 	echo "Hostkey $OBJ/hkr.${k}" >> $OBJ/sshd_proxy.orig
 	nkeys=`expr $nkeys + 1`
@@ -62,7 +62,7 @@ expect_nkeys $nkeys "learn hostkeys"
 check_key_present ssh-rsa || fail "didn't learn keys"
 
 # Check each key type
-for k in `${SSH} -Q key-plain` ; do
+for k in `${SSH} -Q key-plain | grep -v "^x509v3-"` ; do
 	verbose "learn additional hostkeys, type=$k"
 	dossh -oStrictHostKeyChecking=yes -oHostKeyAlgorithms=$k,$all_algs
 	expect_nkeys $nkeys "learn hostkeys $k"

@@ -13,6 +13,8 @@
  *
  * SSH2 implementation,
  * Copyright (c) 2000, 2001 Markus Friedl.  All rights reserved.
+ * X.509 certificates support,
+ * Copyright (c) 2002-2016 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -58,6 +60,8 @@
 #include "rsa.h"
 #include "log.h"
 #include "sshkey.h"
+#include "ssh-x509.h"
+#include "ssh-xkalg.h"
 #include "sshbuf.h"
 #include "authfd.h"
 #include "authfile.h"
@@ -331,7 +335,7 @@ add_file(int agent_fd, const char *filename, int key_only)
 }
 
 static int
-update_card(int agent_fd, int add, const char *id)
+update_card(int agent_fd, int add, const char *id, const char *xstore)
 {
 	char *pin = NULL;
 	int r, ret = -1;
@@ -343,6 +347,7 @@ update_card(int agent_fd, int add, const char *id)
 	}
 
 	if ((r = ssh_update_card(agent_fd, add, id, pin == NULL ? "" : pin,
+	    xstore,
 	    lifetime, confirm)) == 0) {
 		fprintf(stderr, "Card %s: %s\n",
 		    add ? "added" : "removed", id);
@@ -389,6 +394,17 @@ list_identities(int agent_fd, int do_fp)
 				    sshkey_type(idlist->keys[i]));
 				free(fp);
 			} else {
+#ifndef SSH_X509STORE_DISABLED
+				if (sshkey_is_x509(idlist->keys[i])) {
+					/* key_write will print x509 certificate
+					  in blob format :-( */
+					if(!x509key_write_subject(
+					    idlist->keys[i], stdout))
+						fprintf(stderr,
+						    "x509key_write_subject failed");
+					fprintf(stdout, "\n");
+				} else {
+#endif /*ndef SSH_X509STORE_DISABLED*/
 				if ((r = sshkey_write(idlist->keys[i],
 				    stdout)) != 0) {
 					fprintf(stderr, "sshkey_write: %s\n",
@@ -396,6 +412,9 @@ list_identities(int agent_fd, int do_fp)
 					continue;
 				}
 				fprintf(stdout, " %s\n", idlist->comments[i]);
+#ifndef SSH_X509STORE_DISABLED
+				}
+#endif /*ndef SSH_X509STORE_DISABLED*/
 			}
 		}
 		ssh_free_identitylist(idlist);
@@ -468,6 +487,8 @@ usage(void)
 	fprintf(stderr, "  -x          Lock agent.\n");
 	fprintf(stderr, "  -X          Unlock agent.\n");
 	fprintf(stderr, "  -s pkcs11   Add keys from PKCS#11 provider.\n");
+	fprintf(stderr, "  -S xstore   File with extra X.509 certificates in PEM format\n");
+	fprintf(stderr, "              concatenated together.\n");
 	fprintf(stderr, "  -e pkcs11   Remove keys provided by PKCS#11 provider.\n");
 }
 
@@ -477,7 +498,7 @@ main(int argc, char **argv)
 	extern char *optarg;
 	extern int optind;
 	int agent_fd;
-	char *pkcs11provider = NULL;
+	char *pkcs11provider = NULL, *xstore = "";
 	int r, i, ch, deleting = 0, ret = 0, key_only = 0;
 	int xflag = 0, lflag = 0, Dflag = 0;
 
@@ -486,11 +507,10 @@ main(int argc, char **argv)
 	sanitise_stdfd();
 
 	__progname = ssh_get_progname(argv[0]);
-	seed_rng();
+	ssh_OpenSSL_startup();
+	fill_default_xkalg();
 
-#ifdef WITH_OPENSSL
-	OpenSSL_add_all_algorithms();
-#endif
+	seed_rng();
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
 
@@ -507,7 +527,7 @@ main(int argc, char **argv)
 		exit(2);
 	}
 
-	while ((ch = getopt(argc, argv, "klLcdDxXE:e:s:t:")) != -1) {
+	while ((ch = getopt(argc, argv, "klLcdDxXE:e:s:S:t:")) != -1) {
 		switch (ch) {
 		case 'E':
 			fingerprint_hash = ssh_digest_alg_by_name(optarg);
@@ -540,6 +560,9 @@ main(int argc, char **argv)
 			break;
 		case 's':
 			pkcs11provider = optarg;
+			break;
+		case 'S':
+			xstore = optarg;
 			break;
 		case 'e':
 			deleting = 1;
@@ -578,7 +601,7 @@ main(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 	if (pkcs11provider != NULL) {
-		if (update_card(agent_fd, !deleting, pkcs11provider) == -1)
+		if (update_card(agent_fd, !deleting, pkcs11provider, xstore) == -1)
 			ret = 1;
 		goto done;
 	}

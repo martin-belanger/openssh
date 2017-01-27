@@ -1,6 +1,7 @@
 /* $OpenBSD: sshconnect2.c,v 1.251 2016/12/04 23:54:02 djm Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
+ * Copyright (c) 2006,2011 Roumen Petrov.  All rights reserved.
  * Copyright (c) 2008 Damien Miller.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -54,6 +55,8 @@
 #include "compat.h"
 #include "cipher.h"
 #include "key.h"
+#include "ssh-x509.h"
+#include "ssh-xkalg.h"
 #include "kex.h"
 #include "myproposal.h"
 #include "sshconnect.h"
@@ -117,7 +120,7 @@ order_hostkeyalgs(char *host, struct sockaddr *hostaddr, u_short port)
 	for (i = 0; i < options.num_system_hostfiles; i++)
 		load_hostkeys(hostkeys, hostname, options.system_hostfiles[i]);
 
-	oavail = avail = xstrdup(KEX_DEFAULT_PK_ALG);
+	oavail = avail = xstrdup(options.hostkeyalgorithms);
 	maxlen = strlen(avail) + 1;
 	first = xmalloc(maxlen);
 	last = xmalloc(maxlen);
@@ -131,10 +134,12 @@ order_hostkeyalgs(char *host, struct sockaddr *hostaddr, u_short port)
 	} while (0)
 
 	while ((alg = strsep(&avail, ",")) && *alg != '\0') {
-		if ((ktype = sshkey_type_from_name(alg)) == KEY_UNSPEC)
+		int subtype;
+		key_types_from_name(alg, &ktype, &subtype);
+		if (ktype == KEY_UNSPEC)
 			fatal("%s: unknown alg %s", __func__, alg);
-		if (lookup_key_in_hostkeys_by_type(hostkeys,
-		    sshkey_type_plain(ktype), NULL))
+		if (lookup_key_in_hostkeys_by_types(hostkeys,
+		    sshkey_type_plain(ktype), subtype, NULL))
 			ALG_APPEND(first, alg);
 		else
 			ALG_APPEND(last, alg);
@@ -235,6 +240,7 @@ ssh_kex2(char *host, struct sockaddr *hostaddr, u_short port)
 	packet_send();
 	packet_write_wait();
 #endif
+	free(s);
 }
 
 /*
@@ -604,7 +610,7 @@ input_userauth_pk_ok(int type, u_int32_t seq, void *ctxt)
 		debug("unknown pkalg %s", pkalg);
 		goto done;
 	}
-	if ((key = key_from_blob(pkblob, blen)) == NULL) {
+	if ((key = xkey_from_blob(pkalg, pkblob, blen)) == NULL) {
 		debug("no key from blob. pkalg %s", pkalg);
 		goto done;
 	}
@@ -998,6 +1004,11 @@ input_userauth_passwd_changereq(int type, u_int32_t seqnr, void *ctxt)
 static const char *
 identity_sign_encode(struct identity *id)
 {
+#ifdef EXPERIMENTAL_RSA_SHA2_256
+/* IMPORTANT NOTE:
+ * Do not offer rsa-sha2-* until is resolved misconfiguration issue
+ * with allowed  public key algorithms!
+ */
 	struct ssh *ssh = active_state;
 
 	if (id->key->type == KEY_RSA) {
@@ -1008,7 +1019,8 @@ identity_sign_encode(struct identity *id)
 			return "rsa-sha2-512";
 		}
 	}
-	return key_ssh_name(id->key);
+#endif
+	return sshkey_ssh_name(id->key);
 }
 
 static int
@@ -1036,6 +1048,7 @@ identity_sign(struct identity *id, u_char **sigp, size_t *lenp,
 	/* load the private key from the file */
 	if ((prv = load_identity_file(id)) == NULL)
 		return SSH_ERR_KEY_NOT_FOUND;
+	prv->type = id->key->type;
 	ret = sshkey_sign(prv, sigp, lenp, data, datalen, alg, compat);
 	sshkey_free(prv);
 	return (ret);
@@ -1051,14 +1064,16 @@ sign_and_send_pubkey(Authctxt *authctxt, Identity *id)
 	u_int bloblen, skip = 0;
 	int matched, ret = -1, have_sig = 1;
 	char *fp;
+	const char *pkalg;
 
+	pkalg = identity_sign_encode(id);
 	if ((fp = sshkey_fingerprint(id->key, options.fingerprint_hash,
 	    SSH_FP_DEFAULT)) == NULL)
 		return 0;
 	debug3("%s: %s %s", __func__, key_type(id->key), fp);
 	free(fp);
 
-	if (key_to_blob(id->key, &blob, &bloblen) == 0) {
+	if (xkey_to_blob(pkalg, id->key, &blob, &bloblen) == 0) {
 		/* we cannot handle this key */
 		debug3("sign_and_send_pubkey: cannot handle key");
 		return 0;
@@ -1083,7 +1098,7 @@ sign_and_send_pubkey(Authctxt *authctxt, Identity *id)
 	} else {
 		buffer_put_cstring(&b, authctxt->method->name);
 		buffer_put_char(&b, have_sig);
-		buffer_put_cstring(&b, identity_sign_encode(id));
+		buffer_put_cstring(&b, pkalg);
 	}
 	buffer_put_string(&b, blob, bloblen);
 
@@ -1136,7 +1151,7 @@ sign_and_send_pubkey(Authctxt *authctxt, Identity *id)
 		buffer_put_cstring(&b, authctxt->method->name);
 		buffer_put_char(&b, have_sig);
 		if (!(datafellows & SSH_BUG_PKAUTH))
-			buffer_put_cstring(&b, key_ssh_name(id->key));
+			buffer_put_cstring(&b, pkalg);
 		buffer_put_string(&b, blob, bloblen);
 	}
 	free(blob);
@@ -1164,10 +1179,12 @@ send_pubkey_test(Authctxt *authctxt, Identity *id)
 {
 	u_char *blob;
 	u_int bloblen, have_sig = 0;
+	const char *pkalg;
 
-	debug3("send_pubkey_test");
+	pkalg = identity_sign_encode(id);
+	debug3("send_pubkey_test: %s", pkalg);
 
-	if (key_to_blob(id->key, &blob, &bloblen) == 0) {
+	if (xkey_to_blob(pkalg, id->key, &blob, &bloblen) == 0) {
 		/* we cannot handle this key */
 		debug3("send_pubkey_test: cannot handle key");
 		return 0;
@@ -1181,7 +1198,7 @@ send_pubkey_test(Authctxt *authctxt, Identity *id)
 	packet_put_cstring(authctxt->method->name);
 	packet_put_char(have_sig);
 	if (!(datafellows & SSH_BUG_PKAUTH))
-		packet_put_cstring(identity_sign_encode(id));
+		packet_put_cstring(pkalg);
 	packet_put_string(blob, bloblen);
 	free(blob);
 	packet_send();
@@ -1196,13 +1213,14 @@ load_identity_file(Identity *id)
 	int r, perm_ok = 0, quit = 0, i;
 	struct stat st;
 
-	if (stat(id->filename, &st) < 0) {
+	if (strncmp(id->filename, "engine:", 7) != 0 &&
+	    stat(id->filename, &st) < 0) {
 		(id->userprovided ? logit : debug3)("no such identity: %s: %s",
 		    id->filename, strerror(errno));
 		return NULL;
 	}
 	snprintf(prompt, sizeof prompt,
-	    "Enter passphrase for key '%.100s': ", id->filename);
+	    "Enter passphrase for key '%.400s': ", id->filename);
 	for (i = 0; i <= options.number_of_password_prompts; i++) {
 		if (i == 0)
 			passphrase = "";
@@ -1272,6 +1290,7 @@ pubkey_prepare(Authctxt *authctxt)
 	size_t j;
 	struct ssh_identitylist *idlist;
 
+	debug2("preparing keys");
 	TAILQ_INIT(&agent);	/* keys from the agent */
 	TAILQ_INIT(&files);	/* keys from the config file */
 	preferred = &authctxt->keys;
@@ -1378,6 +1397,7 @@ pubkey_prepare(Authctxt *authctxt)
 		TAILQ_REMOVE(&files, id, next);
 		TAILQ_INSERT_TAIL(preferred, id, next);
 	}
+#if 0
 	/* finally, filter by PubkeyAcceptedKeyTypes */
 	TAILQ_FOREACH_SAFE(id, preferred, next, id2) {
 		if (id->key != NULL &&
@@ -1392,6 +1412,12 @@ pubkey_prepare(Authctxt *authctxt)
 			memset(id, 0, sizeof(*id));
 			continue;
 		}
+#else
+	/* NOTE restore previuos behaviour: we filter in try_identity
+	 * where key algorithm could be downgraded
+	 */
+	TAILQ_FOREACH(id, preferred, next) {
+#endif
 		debug2("key: %s (%p)%s%s", id->filename, id->key,
 		    id->userprovided ? ", explicit" : "",
 		    id->agent_fd != -1 ? ", agent" : "");
@@ -1423,10 +1449,55 @@ pubkey_reset(Authctxt *authctxt)
 		id->tried = 0;
 }
 
+/* This method is used only in failback to algorithm based
+ * on plain public key if identity contain X.509 certificate
+ * and its corresponding public key algorithm name does not
+ * match pattern in PubkeyAlgorithms
+ */
+static int
+get_allowed_keytype(Key *k) {
+	char *pattern;
+	const char *alg;
+
+	if (k->type == KEY_RSA1 || k->type == KEY_UNSPEC)
+		return KEY_UNSPEC;
+
+	pattern = options.pubkey_algorithms;
+	if (pattern == NULL)
+		return k->type;
+
+	alg = sshkey_ssh_name(k);
+	if (match_pattern_list(alg, pattern, 0) == 1)
+		return k->type;
+
+	alg = sshkey_ssh_name_plain(k);
+	if (match_pattern_list(alg, pattern, 0) == 1)
+		return key_type_plain(k->type);
+
+	return KEY_UNSPEC;
+}
+
+static void
+set_keytype(Key *k, int kt) {
+	const char *n1, *n2;
+
+	if (k->type == kt) return;
+
+	/* sshkey_ssh_name returns pointer to static */
+	n1 = sshkey_ssh_name(k);
+	k->type = kt;
+	n2 = sshkey_ssh_name(k);
+	debug("Offering key-type '%s', original was '%s'", n2, n1);
+}
+
 static int
 try_identity(Identity *id)
 {
+	int kt;
+
 	if (!id->key)
+		return (0);
+	if (id->key->type == KEY_RSA1)
 		return (0);
 	if (key_type_plain(id->key->type) == KEY_RSA &&
 	    (datafellows & SSH_BUG_RSASIGMD5) != 0) {
@@ -1434,7 +1505,22 @@ try_identity(Identity *id)
 		    key_type(id->key), id->filename);
 		return (0);
 	}
-	return (id->key->type != KEY_RSA1);
+
+	/* TODO avoid plain for X.509 certificates */
+	kt = get_allowed_keytype(id->key);
+	if (kt == KEY_UNSPEC) {
+		if (get_log_level() >= SYSLOG_LEVEL_DEBUG1) {
+			debug("not allowed algorithm '%s', key is '%s'",
+			      sshkey_ssh_name(id->key), id->filename);
+		} else {
+			logit("not allowed algorithm '%s'",
+			      sshkey_ssh_name(id->key));
+		}
+		return (0);
+	}
+
+	set_keytype(id->key, kt);
+	return (1);
 }
 
 int
@@ -1690,6 +1776,7 @@ userauth_hostbased(Authctxt *authctxt)
 	struct ssh *ssh = active_state;
 	struct sshkey *private = NULL;
 	struct sshbuf *b = NULL;
+	const char *pkalg;
 	const char *service;
 	u_char *sig = NULL, *keyblob = NULL;
 	char *fp = NULL, *chost = NULL, *lname = NULL;
@@ -1749,8 +1836,9 @@ userauth_hostbased(Authctxt *authctxt)
 		error("%s: sshkey_fingerprint failed", __func__);
 		goto out;
 	}
+	pkalg = sshkey_ssh_name(private);
 	debug("%s: trying hostkey %s %s",
-	    __func__, sshkey_ssh_name(private), fp);
+	    __func__, pkalg, fp);
 
 	/* figure out a name for the client host */
 	if ((lname = get_local_name(packet_get_connection_in())) == NULL) {
@@ -1770,8 +1858,9 @@ userauth_hostbased(Authctxt *authctxt)
 		error("%s: sshbuf_new failed", __func__);
 		goto out;
 	}
-	if ((r = sshkey_to_blob(private, &keyblob, &keylen)) != 0) {
-		error("%s: sshkey_to_blob: %s", __func__, ssh_err(r));
+	r = Xkey_to_blob(pkalg, private, &keyblob, &keylen);
+	if (r != SSH_ERR_SUCCESS) {
+		error("%s: key to blob: %s", __func__, ssh_err(r));
 		goto out;
 	}
 	if ((r = sshbuf_put_string(b, session_id2, session_id2_len)) != 0 ||

@@ -36,7 +36,9 @@
 #include <string.h>
 #include <signal.h>
 
+#include "evp-compat.h"
 #include "sshkey.h"
+#include "ssh-x509.h"
 #include "cipher.h"
 #include "digest.h"
 #include "kex.h"
@@ -56,6 +58,7 @@ kexdh_client(struct ssh *ssh)
 {
 	struct kex *kex = ssh->kex;
 	int r;
+	const BIGNUM *pub_key;
 
 	/* generate and send 'e', client DH public key */
 	switch (kex->kex_type) {
@@ -81,15 +84,18 @@ kexdh_client(struct ssh *ssh)
 		goto out;
 	}
 	debug("sending SSH2_MSG_KEXDH_INIT");
-	if ((r = dh_gen_key(kex->dh, kex->we_need * 8)) != 0 ||
-	    (r = sshpkt_start(ssh, SSH2_MSG_KEXDH_INIT)) != 0 ||
-	    (r = sshpkt_put_bignum2(ssh, kex->dh->pub_key)) != 0 ||
+	if ((r = dh_gen_key(kex->dh, kex->we_need * 8)) != 0)
+		goto out;
+	pub_key = NULL;
+	DH_get0_key(kex->dh, &pub_key, NULL);
+	if ((r = sshpkt_start(ssh, SSH2_MSG_KEXDH_INIT)) != 0 ||
+	    (r = sshpkt_put_bignum2(ssh, pub_key)) != 0 ||
 	    (r = sshpkt_send(ssh)) != 0)
 		goto out;
 #ifdef DEBUG_KEXDH
 	DHparams_print_fp(stderr, kex->dh);
 	fprintf(stderr, "pub= ");
-	BN_print_fp(stderr, kex->dh->pub_key);
+	BN_print_fp(stderr, pub_key);
 	fprintf(stderr, "\n");
 #endif
 	debug("expecting SSH2_MSG_KEXDH_REPLY");
@@ -116,14 +122,13 @@ input_kex_dh(int type, u_int32_t seq, void *ctxt)
 		goto out;
 	}
 	/* key, cert */
-	if ((r = sshpkt_get_string(ssh, &server_host_key_blob,
-	    &sbloblen)) != 0 ||
-	    (r = sshkey_from_blob(server_host_key_blob, sbloblen,
-	    &server_host_key)) != 0)
-		goto out;
-	if (server_host_key->type != kex->hostkey_type ||
-	    (kex->hostkey_type == KEY_ECDSA &&
-	    server_host_key->ecdsa_nid != kex->hostkey_nid)) {
+	r = sshpkt_get_string(ssh, &server_host_key_blob, &sbloblen);
+	if (r != 0) goto out;
+
+	r = Xkey_from_blob(kex->hostkey_alg, server_host_key_blob, sbloblen, &server_host_key);
+	if (r != SSH_ERR_SUCCESS) goto out;
+
+	if (!sshkey_match_pkalg(server_host_key, kex->hostkey_alg)) {
 		r = SSH_ERR_KEY_TYPE_MISMATCH;
 		goto out;
 	}
@@ -168,6 +173,11 @@ input_kex_dh(int type, u_int32_t seq, void *ctxt)
 	dump_digest("shared secret", kbuf, kout);
 #endif
 
+{
+	const BIGNUM *pub_key = NULL;
+
+	DH_get0_key(kex->dh, &pub_key, NULL);
+
 	/* calc and verify H */
 	hashlen = sizeof(hash);
 	if ((r = kex_dh_hash(
@@ -177,11 +187,12 @@ input_kex_dh(int type, u_int32_t seq, void *ctxt)
 	    sshbuf_ptr(kex->my), sshbuf_len(kex->my),
 	    sshbuf_ptr(kex->peer), sshbuf_len(kex->peer),
 	    server_host_key_blob, sbloblen,
-	    kex->dh->pub_key,
+	    pub_key,
 	    dh_server_pub,
 	    shared_secret,
 	    hash, &hashlen)) != 0)
 		goto out;
+}
 
 	if ((r = sshkey_verify(server_host_key, signature, slen, hash, hashlen,
 	    ssh->compat)) != 0)

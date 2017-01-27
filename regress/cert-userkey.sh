@@ -7,10 +7,12 @@ rm -f $OBJ/authorized_keys_$USER $OBJ/user_ca_key* $OBJ/cert_user_key*
 cp $OBJ/sshd_proxy $OBJ/sshd_proxy_bak
 cp $OBJ/ssh_proxy $OBJ/ssh_proxy_bak
 
-PLAIN_TYPES=`$SSH -Q key-plain | sed 's/^ssh-dss/ssh-dsa/;s/^ssh-//'`
+PLAIN_TYPES=`$SSH -Q key-plain | grep -v "^x509v3-" | sed 's/^ssh-dss/ssh-dsa/;s/^ssh-//'`
 
 if echo "$PLAIN_TYPES" | grep '^rsa$' >/dev/null 2>&1 ; then
+    if config_defined HAVE_EVP_SHA256 ; then
 	PLAIN_TYPES="$PLAIN_TYPES rsa-sha2-256 rsa-sha2-512"
+    fi
 fi
 
 kname() {

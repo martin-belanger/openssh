@@ -4,6 +4,9 @@
  * Copyright (c) 2003 Wesley Griffin. All rights reserved.
  * Copyright (c) 2003 Jakob Schlyter. All rights reserved.
  *
+ * X.509 certificates support:
+ * Copyright (c) 2005,2011,2012 Roumen Petrov.  All rights reserved.
+ *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
  * are met:
@@ -36,13 +39,30 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <openssl/x509.h>
 
 #include "xmalloc.h"
 #include "sshkey.h"
 #include "ssherr.h"
+#include "ssh-x509.h"
+#include "uuencode.h"
 #include "dns.h"
 #include "log.h"
 #include "digest.h"
+
+
+struct ssh_dns_cert_param_s {
+	int     cert_type;
+	int     key_tag;
+	int     algo;
+	u_char *cert_data;
+	size_t  cert_len;
+	u_char *b64_data;
+	size_t  b64_len;
+};
+
+typedef struct ssh_dns_cert_param_s ssh_dns_cert_param;
+
 
 static const char *errset_text[] = {
 	"success",		/* 0 ERRSET_SUCCESS */
@@ -136,6 +156,161 @@ dns_read_key(u_int8_t *algorithm, u_int8_t *digest_type,
 	return success;
 }
 
+static void
+cert_param_clean(ssh_dns_cert_param *param) {
+	if (param == NULL) return;
+
+	if (param->cert_data) {
+		param->cert_len = 0;
+		free(param->cert_data);
+		param->cert_data = NULL;
+	}
+	if (param->b64_data) {
+		param->b64_len = 0;
+		free(param->b64_data);
+		param->b64_data = NULL;
+	}
+}
+
+static const char*
+bind_cert_type(const ssh_dns_cert_param *param) {
+	switch(param->cert_type) {
+	case DNS_CERT_TYPE_PKIX: return("PKIX");
+#if 0
+	case DNS_CERT_TYPE_SPKI: return("SPKI");
+	case DNS_CERT_TYPE_PGP : return("PGP");
+	case DNS_CERT_TYPE_URI : return("URI");
+	case DNS_CERT_TYPE_OID : return("OID");
+#endif
+	default:
+		break;
+	}
+	return("<UNSUPPORTED>");
+}
+
+static const char*
+bind_key_algo(const ssh_dns_cert_param *param) {
+	switch(param->algo) {
+#if 0
+	case DNS_KEY_ALGO_UNKNOWN: /*specific case for CERT RR*/
+				    return("????");
+#endif
+	case DNS_KEY_ALGO_RSAMD5  : return("RSAMD5");
+	case DNS_KEY_ALGO_DSA     : return("DSA");
+	case DNS_KEY_ALGO_RSASHA1 : return("RSASHA1");
+	}
+	return("<UNSUPPORTED>");
+}
+
+static u_int16_t
+calc_dns_key_tag(X509 *x509) {
+	/* [RFC 2535] Appendix C: Key Tag Calculation */
+
+	/* TODO: to be implemented or not ?
+	 * I'm happy without this.
+	 */
+	return(1);
+}
+
+static inline const X509_ALGOR*
+ssh_X509_get0_tbs_sigalg(X509 *x509) {
+	if (x509 == NULL) return(NULL);
+
+#ifdef HAVE_X509_GET0_TBS_SIGALG
+	return(X509_get0_tbs_sigalg(x509));
+#else
+{
+	X509_CINF *ci = x509->cert_info;
+	return(ci != NULL ? ci->signature: NULL);
+}
+#endif
+}
+
+static u_int8_t
+get_dns_sign_algo(X509 *x509) {
+	int rsa_algo = DNS_KEY_ALGO_UNKNOWN;
+	int algo_nid;
+
+	const X509_ALGOR *sig;
+	ASN1_OBJECT *alg;
+
+	sig = ssh_X509_get0_tbs_sigalg(x509);
+	if (sig == NULL) goto done;
+
+	alg = sig->algorithm;
+	if (alg == NULL) goto done;
+
+	algo_nid = OBJ_obj2nid(alg);
+	debug3("get_dns_sign_algo: nid=%d(%s)\n", algo_nid, OBJ_nid2ln(algo_nid));
+
+	switch(algo_nid) {
+	case NID_md5WithRSAEncryption:
+		rsa_algo = DNS_KEY_ALGO_RSAMD5;
+		break;
+	case NID_sha1WithRSAEncryption:
+		rsa_algo = DNS_KEY_ALGO_RSASHA1;
+		break;
+	case NID_md2WithRSAEncryption:
+	case NID_md4WithRSAEncryption:
+	case NID_ripemd160WithRSA:
+		/* not defined in [RFC 2535] ! */
+		rsa_algo = DNS_KEY_ALGO_UNKNOWN;
+		break;
+	case NID_dsaWithSHA1:
+		rsa_algo = DNS_KEY_ALGO_DSA;
+		break;
+	default:
+		rsa_algo = DNS_KEY_ALGO_UNKNOWN;
+	}
+
+done:
+	return(rsa_algo);
+}
+
+/*
+ * Read CERT parameters from key buffer.
+ */
+static int/*bool*/
+dns_read_cert(ssh_dns_cert_param *param, const Key *key)
+{
+	int   ret = 0;
+	X509 *x509;
+	BIO  *bio = NULL;
+	int   k = 0;
+
+	if (param == NULL) goto done;
+	if (key   == NULL) goto done;
+
+	x509 = SSH_X509_get_cert(key->x509_data);
+	if (x509 == NULL) goto done;
+
+	bio = BIO_new(BIO_s_mem());
+	if (bio == NULL) goto done;
+
+	i2d_X509_bio(bio, x509);
+	(void)BIO_flush(bio);
+
+	cert_param_clean(param);
+
+	k = BIO_pending(bio);
+	param->cert_data = xmalloc(k + 1); /*fatal on error*/
+	param->cert_len = BIO_read(bio, param->cert_data, k);
+
+	k = param->cert_len << 1;
+	param->b64_data = xmalloc(k); /*fatal on error*/
+	param->b64_len = uuencode(param->cert_data, param->cert_len, (char*)param->b64_data, k);
+
+	param->algo = get_dns_sign_algo(x509);
+	param->key_tag = calc_dns_key_tag(x509);
+	param->cert_type = DNS_CERT_TYPE_PKIX;
+
+	ret = 1;
+
+done:
+	if (bio) BIO_free_all(bio);
+	return(ret);
+}
+
 /*
  * Read SSHFP parameters from rdata buffer.
  */
@@ -197,6 +372,127 @@ is_numeric_hostname(const char *hostname)
 }
 
 /*
+ * Read CERT parameters from rdata buffer.
+ */
+static int/*bool*/
+dns_read_cert_rdata(ssh_dns_cert_param *param, u_char *rdata, int rdata_len)
+{
+	size_t len ;
+
+	cert_param_clean(param);
+
+	if (rdata_len < 5) return(0);
+
+	param->cert_type = (rdata[0] << 8) + rdata[1];
+	param->key_tag   = (rdata[2] << 8) + rdata[3];
+	param->algo      = rdata[4];
+
+	len = rdata_len - 5;
+	param->cert_len = len;
+	if (len > 0) {
+		param->cert_data = (u_char *) xmalloc(len);
+		memcpy(param->cert_data, rdata + 5, len);
+	}
+	return(1);
+}
+
+/*
+ * Verify the given hostname, address and host key using DNS.
+ * Returns 0 if lookup succeeds, -1 otherwise
+ */
+static int
+verify_hostcert_dns(const char *hostname, const Key *hostkey, int *flags)
+{
+	u_int counter;
+	int result;
+	struct rrsetinfo *certs = NULL;
+
+	ssh_dns_cert_param hostkey_param;
+	ssh_dns_cert_param dnskey_param;
+
+	debug3("verify_hostcert_dns");
+
+	memset(&hostkey_param, 0, sizeof(hostkey_param));
+	memset(&dnskey_param , 0, sizeof(dnskey_param ));
+
+	result = getrrsetbyname(hostname, DNS_RDATACLASS_IN,
+	    DNS_RDATATYPE_CERT, 0, &certs);
+	if (result) {
+		verbose("DNS lookup error: %s", dns_result_totext(result));
+		return(-1);
+	}
+
+	if (certs->rri_flags & RRSET_VALIDATED) {
+		*flags |= DNS_VERIFY_SECURE;
+		debug("found %d secure certificates in DNS",
+		    certs->rri_nrdatas);
+	} else {
+		debug("found %d insecure certificates in DNS",
+		    certs->rri_nrdatas);
+	}
+
+	/* Initialize host key parameters */
+	if (!dns_read_cert(&hostkey_param, hostkey)) {
+		error("Error calculating host key certificate.");
+		cert_param_clean(&hostkey_param);
+		freerrset(certs);
+		return(-1);
+	}
+
+	if (certs->rri_nrdatas)
+		*flags |= DNS_VERIFY_FOUND;
+
+	for (counter = 0 ; counter < certs->rri_nrdatas ; counter++)  {
+		Key* dns_cert = NULL;
+		/*
+		 * Extract the key from the answer. Ignore any badly
+		 * formatted certificates.
+		 */
+		if (!dns_read_cert_rdata(&dnskey_param,
+		    certs->rri_rdatas[counter].rdi_data,
+		    certs->rri_rdatas[counter].rdi_length
+		)) {
+			verbose("Error parsing certificate from DNS.");
+			goto next;
+		}
+
+		if (hostkey_param.cert_type != dnskey_param.cert_type) continue;
+
+		/* We will skip useless "key tag" */
+
+		/* We will ignore "algorithm" since number of
+		 * algorithms defined in [RFC 2535] is limited.
+		 */
+		dns_cert = x509key_from_blob(dnskey_param.cert_data, dnskey_param.cert_len);
+		if (dns_cert == NULL) {
+			verbose("Invalid certificate from DNS.");
+			goto next;
+		}
+		if (ssh_x509_cmp_cert(hostkey, dns_cert) == 0) {
+			*flags |= DNS_VERIFY_MATCH;
+		}
+		key_free(dns_cert);
+		dns_cert = NULL;
+
+next:
+		cert_param_clean(&dnskey_param);
+	}
+
+	cert_param_clean(&hostkey_param);
+	freerrset(certs);
+
+	if (*flags & DNS_VERIFY_FOUND)
+		if (*flags & DNS_VERIFY_MATCH)
+			debug("matching host key certificate found in DNS");
+		else
+			debug("mismatching host key certificate found in DNS");
+	else
+		debug("no host key certificate found in DNS");
+
+	return(0);
+}
+
+/*
  * Verify the given hostname, address and host key using DNS.
  * Returns 0 if lookup succeeds, -1 otherwise
  */
@@ -227,6 +523,14 @@ verify_host_key_dns(const char *hostname, struct sockaddr *address,
 	if (is_numeric_hostname(hostname)) {
 		debug("skipped DNS lookup for numerical hostname");
 		return -1;
+	}
+
+	if (key_is_x509(hostkey)) {
+		result = verify_hostcert_dns(hostname, hostkey, flags);
+		if (*flags & DNS_VERIFY_FOUND) {
+			return(result);
+		}
+		/*try to found SSHFP RR*/
 	}
 
 	result = getrrsetbyname(hostname, DNS_RDATACLASS_IN,
@@ -319,8 +623,55 @@ export_dns_rr(const char *hostname, struct sshkey *key, FILE *f, int generic)
 	u_int8_t dtype;
 	u_char *rdata_digest;
 	size_t i, rdata_digest_len;
+	ssh_dns_cert_param cert_param;
 	int success = 0;
 
+	memset(&cert_param, 0, sizeof(cert_param));
+
+	if (dns_read_cert(&cert_param, key)) {
+		u_char *p;
+		int k;
+
+		if (generic || (cert_param.algo == DNS_KEY_ALGO_UNKNOWN)) {
+			fprintf(f, "%s\tIN\tTYPE%d \\# %d %04x %04x %02x (\n\t"
+			    , hostname
+			    , DNS_RDATATYPE_CERT
+			    , (int)(5 + cert_param.cert_len)
+			    , cert_param.cert_type
+			    , cert_param.key_tag
+			    , cert_param.algo
+			);
+			p = cert_param.cert_data;
+			i = cert_param.cert_len;
+			k = 32;
+			for (; i > 0; i--, p++) {
+				fprintf(f, "%02x", (int) *p);
+				if (--k <= 0) {
+					fprintf(f, "\n\t");
+					k = 32;
+				}
+			}
+		} else {
+			fprintf(f, "%s\tIN\tCERT\t%s %d %s (\n\t"
+			    , hostname
+			    , bind_cert_type(&cert_param)
+			    , cert_param.key_tag
+			    , bind_key_algo(&cert_param)
+			);
+			p = cert_param.b64_data;
+			i = cert_param.b64_len;
+			k = 64;
+			for (; i > 0; i--, p++) {
+				fprintf(f, "%c", *p);
+				if (--k <= 0) {
+					fprintf(f, "\n\t");
+					k = 64;
+				}
+			}
+		}
+		fprintf(f, "\n\t)\n");
+		success = 1;
+	} else
 	for (dtype = SSHFP_HASH_SHA1; dtype < SSHFP_HASH_MAX; dtype++) {
 		rdata_digest_type = dtype;
 		if (dns_read_key(&rdata_pubkey_algorithm, &rdata_digest_type,
@@ -347,5 +698,6 @@ export_dns_rr(const char *hostname, struct sshkey *key, FILE *f, int generic)
 		error("%s: unsupported algorithm and/or digest_type", __func__);
 	}
 
+	cert_param_clean(&cert_param);
 	return success;
 }

@@ -11,11 +11,35 @@
  * software must be clearly marked as such, and if the derived work is
  * incompatible with the protocol description in the RFC file, it must be
  * called by a name other than "ssh" or "Secure Shell".
+ *
+ * X509 certificate support,
+ * Copyright (c) 2002-2006,2011 Roumen Petrov.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+ * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+ * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+ * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+ * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+ * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef READCONF_H
 #define READCONF_H
 
+#include "x509store.h"
 /* Data structure for representing option data. */
 
 #define MAX_SEND_ENV		256
@@ -134,6 +158,25 @@ typedef struct {
 
 	int	hash_known_hosts;
 
+	char*   hostbased_algorithms;	/* Allowed hostbased algorithms. */
+	char*   pubkey_algorithms;	/* Allowed pubkey algorithms. */
+
+	/* Supported X.509 key algorithms and signatures
+	   are defined is external source. */
+
+	/* ssh PKI(X509) flags */
+	SSH_X509Flags    *x509flags;
+#ifndef SSH_X509STORE_DISABLED
+	/* sshd PKI(X509) system store */
+	X509StoreOptions ca;
+	/* sshd PKI(X509) user store */
+	X509StoreOptions userca;
+#endif /*ndef SSH_X509STORE_DISABLED*/
+#ifdef SSH_OCSP_ENABLED
+	/* ssh X.509 extra validation */
+	VAOptions va;
+#endif /*def SSH_OCSP_ENABLED*/
+
 	int	tun_open;	/* tun(4) */
 	int     tun_local;	/* force tun device (optional) */
 	int     tun_remote;	/* force tun device (optional) */
@@ -212,5 +255,10 @@ void	 add_local_forward(Options *, const struct Forward *);
 void	 add_remote_forward(Options *, const struct Forward *);
 void	 add_identity_file(Options *, const char *, const char *, int);
 void	 add_certificate_file(Options *, const char *, int);
+
+#ifdef USE_OPENSSL_ENGINE
+int/*bool*/ process_engconfig_file(const char *filename);
+int/*bool*/ process_engconfig_line(char *line, const char *filename, int linenum);
+#endif
 
 #endif				/* READCONF_H */

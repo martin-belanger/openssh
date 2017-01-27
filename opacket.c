@@ -6,7 +6,7 @@
 #include "packet.h"
 #include "log.h"
 
-struct ssh *active_state, *backup_state;
+struct ssh *active_state = NULL;
 
 /* Map old to new API */
 
@@ -76,7 +76,7 @@ ssh_packet_put_raw(struct ssh *ssh, const void *buf, u_int len)
 
 #ifdef WITH_SSH1
 void
-ssh_packet_put_bignum(struct ssh *ssh, BIGNUM * value)
+ssh_packet_put_bignum(struct ssh *ssh, const BIGNUM * value)
 {
 	int r;
 
@@ -87,7 +87,7 @@ ssh_packet_put_bignum(struct ssh *ssh, BIGNUM * value)
 
 #ifdef WITH_OPENSSL
 void
-ssh_packet_put_bignum2(struct ssh *ssh, BIGNUM * value)
+ssh_packet_put_bignum2(struct ssh *ssh, const BIGNUM * value)
 {
 	int r;
 
@@ -273,6 +273,7 @@ void
 packet_close(void)
 {
 	ssh_packet_close(active_state);
+	free(active_state);
 	active_state = NULL;
 }
 

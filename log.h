@@ -52,6 +52,8 @@ void     log_init(char *, LogLevel, SyslogFacility, int);
 void     log_change_level(LogLevel);
 int      log_is_on_stderr(void);
 void     log_redirect_stderr_to(const char *);
+LogLevel get_log_level(void);
+char*    openssl_errormsg(char *buf, size_t len);
 
 SyslogFacility	log_facility_number(char *);
 const char * 	log_facility_name(SyslogFacility);

@@ -55,6 +55,7 @@
 #include <unistd.h>
 #include <limits.h>
 
+#include "sshlogin.h"
 #include "loginrec.h"
 #include "log.h"
 #include "buffer.h"

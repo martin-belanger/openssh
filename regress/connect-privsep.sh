@@ -7,6 +7,7 @@ cp $OBJ/sshd_proxy $OBJ/sshd_proxy.orig
 echo 'UsePrivilegeSeparation yes' >> $OBJ/sshd_proxy
 
 for p in ${SSH_PROTOCOLS}; do
+	echo "= UsePrivilegeSeparation yes, protocol $p" >> $TEST_SSH_LOGFILE
 	${SSH} -$p -F $OBJ/ssh_proxy 999.999.999.999 true
 	if [ $? -ne 0 ]; then
 		fail "ssh privsep+proxyconnect protocol $p failed"
@@ -17,6 +18,7 @@ cp $OBJ/sshd_proxy.orig $OBJ/sshd_proxy
 echo 'UsePrivilegeSeparation sandbox' >> $OBJ/sshd_proxy
 
 for p in ${SSH_PROTOCOLS}; do
+	echo "= UsePrivilegeSeparation sandbox, protocol $p" >> $TEST_SSH_LOGFILE
 	${SSH} -$p -F $OBJ/ssh_proxy 999.999.999.999 true
 	if [ $? -ne 0 ]; then
 		# XXX replace this with fail once sandbox has stabilised
@@ -31,6 +33,9 @@ if [ -z "TEST_MALLOC_OPTIONS" ]; then
 else
 	mopts=`echo $TEST_MALLOC_OPTIONS | sed 's/./& /g'`
 fi
+# Skip tests as sandbox is not stabilized yet and the tested malloc
+# options are OpenBSD specific.
+: || \
 for m in '' $mopts ; do
     for p in ${SSH_PROTOCOLS}; do
 	env MALLOC_OPTIONS="$m" ${SSH} -$p -F $OBJ/ssh_proxy 999.999.999.999 true

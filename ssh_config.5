@@ -1,3 +1,11 @@
+.\" Implement .Dd with the Mdocdate RCS keyword
+.rn Dd xD
+.de Dd
+.ie \\$1$Mdocdate: \{\
+.	xD \\$2 \\$3, \\$4
+.\}
+.el .xD \\$1 \\$2 \\$3 \\$4 \\$5 \\$6 \\$7 \\$8
+..
 .\"
 .\" Author: Tatu Ylonen <ylo@cs.hut.fi>
 .\" Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -12,6 +20,7 @@
 .\" Copyright (c) 1999,2000 Markus Friedl.  All rights reserved.
 .\" Copyright (c) 1999 Aaron Campbell.  All rights reserved.
 .\" Copyright (c) 1999 Theo de Raadt.  All rights reserved.
+.\" Copyright (c) 2002-2016 Roumen Petrov.  All rights reserved.
 .\"
 .\" Redistribution and use in source and binary forms, with or without
 .\" modification, are permitted provided that the following conditions
@@ -246,6 +255,20 @@ Valid arguments are
 (use IPv4 only), or
 .Cm inet6
 (use IPv6 only).
+.It Cm AllowedCertPurpose
+The intended use for the X.509 server certificate. Without this option
+no chain verification will be done. Currently accepted uses are case
+insensitive:
+.Bl -tag -width Ds -compact
+.It Cm sslserver | Cm SSL server | Cm SSL_server | Cm server
+only SSL-server purpose
+.It Cm any | Cm Any Purpose | Cm Any_Purpose | Cm AnyPurpose
+allow any purpose
+.It Cm skip | Cm '' Li (empty)
+do not check purpose
+.El
+The default is
+.Cm sslserver .
 .It Cm BatchMode
 If set to
 .Cm yes ,
@@ -265,6 +288,60 @@ Note that this option does not work if
 .Cm UsePrivilegedPort
 is set to
 .Cm yes .
+.It Cm CACertificateFile
+.Dq X509 store
+option:
+This file contain multiple certificates of certificate signers in
+PEM format concatenated together. The default is
+.Pa /etc/ssh/ca/ca-bundle.crt .
+.It Cm CACertificatePath
+.Dq X509 store
+option:
+.Dq "Hash dir"
+with certificates of certificate signers. Each certificate should be
+stored in separate file with name [HASH].[NUMBER], where [HASH] is
+certificate hash value and [NUMBER] is an integer starting from zero.
+The default is
+.Pa /etc/ssh/ca/crt .
+.It Cm CAldapVersion
+.Dq X509 store
+option:
+Specifies LDAP protocol version.
+The default depend from LDAP library.
+.It Cm CAldapURL
+.Dq X509 store
+option:
+Specifies hostport and dn of LDAP URLs (Uniform Resource Locators)
+as detailed in RFC 2255. The rest of URL is build internally.
+Because of OpenSSH options parser limitation use
+.Sq %3D
+instead of
+.Sq =
+!
+LDAP initialization method may require URL to be escaped, i.e. use
+.Sq %2C
+instead of
+.Sq \&,
+(comma).
+Escaped URL don't depend from LDAP initialization method.
+.It Cm CARevocationFile
+.Dq X509 store
+option:
+This file contain multiple
+.Dq "Certificate Revocation List"
+(CRL) of certificate signers in PEM format concatenated together.
+The default is
+.Pa /etc/ssh/ca/ca-bundle.crl .
+.It Cm CARevocationPath
+.Dq X509 store
+option:
+.Dq "Hash dir"
+with
+.Dq "Certificate Revocation List"
+(CRL) of certificate signers. Each CRL should be stored in separate
+file with name [HASH].r[NUMBER], where [HASH] is CRL hash value and
+[NUMBER] is an integer starting from zero. The default is
+.Pa /etc/ssh/ca/crl .
 .It Cm CanonicalDomains
 When
 .Cm CanonicalizeHostname
@@ -778,28 +855,26 @@ or
 .Cm no
 (the default).
 .It Cm HostbasedKeyTypes
-Specifies the key types that will be used for hostbased authentication
-as a comma-separated pattern list.
-Alternately if the specified value begins with a
-.Sq +
-character, then the specified key types will be appended to the default set
-instead of replacing them.
-The default for this option is:
-.Bd -literal -offset 3n
-ecdsa-sha2-nistp256-cert-v01@openssh.com,
-ecdsa-sha2-nistp384-cert-v01@openssh.com,
-ecdsa-sha2-nistp521-cert-v01@openssh.com,
-ssh-ed25519-cert-v01@openssh.com,
-ssh-rsa-cert-v01@openssh.com,
-ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,
-ssh-ed25519,ssh-rsa
-.Ed
+Option compatibility. See
+.Cm HostbasedAlgorithms
 .Pp
-The
-.Fl Q
-option of
-.Xr ssh 1
-may be used to list supported key types.
+.It Cm HostbasedAlgorithms
+Specifies the protocol version 2 algorithms that will be used in
+.Cm hostbased
+authentication as a comma-separated pattern list.
+See
+.Sx PATTERNS
+for more information on patterns.
+The default
+.Cm *
+allows all algorithms.
+Note algorithms that use X.509 certificates depend from
+.Cm X509KeyAlgorithm
+and is enough pattern to match one of names set in
+.Cm X509KeyAlgorithm
+for a certain key-type to enable all from that key-type.
+The list of supported algorithms may also be obtained using
+.Qq ssh -Q key .
 .It Cm HostKeyAlgorithms
 Specifies the host key algorithms
 that the client wants to use in order of preference.
@@ -807,7 +882,12 @@ Alternately if the specified value begins with a
 .Sq +
 character, then the specified key types will be appended to the default set
 instead of replacing them.
-The default for this option is:
+The default for this option depend from
+.Cm X509KeyAlgorithm .
+It contain first X509KeyAlgorithm for RSA key,
+followed by X509KeyAlgorithms for ECDSA keys,
+followed by first X509KeyAlgorithm for DSA key,
+followed by
 .Bd -literal -offset 3n
 ecdsa-sha2-nistp256-cert-v01@openssh.com,
 ecdsa-sha2-nistp384-cert-v01@openssh.com,
@@ -898,6 +978,15 @@ for protocol version 1, and
 and
 .Pa ~/.ssh/id_rsa
 for protocol version 2.
+.Pp
+Identity for protocol version 2 may contain
+X.509 certificate that match private key.
+For x509v3-ecdsa-sha2-* public key algorithms, file
+with ECDSA key may contain extra X.509 certificates.
+Extra certificates along with certificates from X.509 store
+are used to build chain of certificates leading to
+a trusted certificate authority.
+.Pp
 Additionally, any identities represented by the authentication agent
 will be used for authentication unless
 .Cm IdentitiesOnly
@@ -1119,6 +1208,15 @@ hmac-sha2-256,hmac-sha2-512,hmac-sha1
 .Pp
 The list of available MAC algorithms may also be obtained using
 .Qq ssh -Q mac .
+.It Cm MandatoryCRL
+.Dq X509 store
+option:
+Specifies whether CRL must present in store for all certificates in
+.Dq certificate chain
+with atribute
+.Dq X509v3 CRL Distribution Points .
+The default is
+.Cm no .
 .It Cm NoHostAuthenticationForLocalhost
 This option can be used if the home directory is shared across machines.
 In this case localhost will refer to a different machine on each of
@@ -1157,7 +1255,7 @@ Specifies which PKCS#11 provider to use.
 The argument to this keyword is the PKCS#11 shared library
 .Xr ssh 1
 should use to communicate with a PKCS#11 token providing the user's
-private RSA key.
+private EC or RSA key and X.509 certificate.
 .It Cm Port
 Specifies the port number to connect on the remote host.
 The default is 22.
@@ -1258,24 +1356,31 @@ instead of continuing to execute and pass data.
 The default is
 .Cm no .
 .It Cm PubkeyAcceptedKeyTypes
-Specifies the key types that will be used for public key authentication
-as a comma-separated pattern list.
-Alternately if the specified value begins with a
-.Sq +
-character, then the key types after it will be appended to the default
-instead of replacing it.
-The default for this option is:
-.Bd -literal -offset 3n
-ecdsa-sha2-nistp256-cert-v01@openssh.com,
-ecdsa-sha2-nistp384-cert-v01@openssh.com,
-ecdsa-sha2-nistp521-cert-v01@openssh.com,
-ssh-ed25519-cert-v01@openssh.com,
-ssh-rsa-cert-v01@openssh.com,
-ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,
-ssh-ed25519,ssh-rsa
-.Ed
-.Pp
-The list of available key types may also be obtained using
+Option compatibility. See
+.Cm PubkeyAlgorithms
+.It Cm PubkeyAlgorithms
+Specifies the protocol version 2 algorithms used in
+.Dq publickey
+authentication allowed to sent to the host.
+See
+.Sx PATTERNS
+for more information on patterns.
+The default
+.Cm *
+allows all algorithms and depend from
+.Cm X509KeyAlgorithm ,
+i.e. the option allow all specified by
+.Cm X509KeyAlgorithm
+plus
+.Dq plain
+key algorithms like
+ecdsa-sha2-nistp256, ecdsa-sha2-nistp384, ecdsa-sha2-nistp521,
+ssh-ed25519, ssh-rsa and ssh-dss.
+If a X.509 certificate is used as identity
+but corresponding algorithm is not allowed
+the client will try plain key algorithm
+conforming to certificate public key if allowed.
+The list of supported key algorithms may also be obtained using
 .Qq ssh -Q key .
 .It Cm PubkeyAuthentication
 Specifies whether to try public key authentication.
@@ -1613,14 +1718,101 @@ Specifies the user to log in as.
 This can be useful when a different user name is used on different machines.
 This saves the trouble of
 having to remember to give the user name on the command line.
+.It Cm UserCACertificateFile
+.Dq X509 store
+option:
+User
+.Cm CACertificateFile
+, the default is
+.Pa ~/.ssh/ca-bundle.crt .
+.It Cm UserCACertificatePath
+.Dq X509 store
+option:
+User
+.Cm CACertificatePath
+, the default is
+.Pa ~/.ssh/crt .
+.It Cm UserCAldapVersion
+.Dq X509 store
+option:
+User
+.Cm CAldapVersion .
+.It Cm UserCAldapURL
+.Dq X509 store
+option:
+User
+.Cm CAldapURL .
+.It Cm UserCARevocationFile
+.Dq X509 store
+option:
+User
+.Cm CARevocationFile
+, the default is
+.Pa ~/.ssh/ca-bundle.crl .
+.It Cm UserCARevocationPath
+.Dq X509 store
+option:
+User
+.Cm CARevocationPath
+, the default is
+.Pa ~/.ssh/crl .
 .It Cm UserKnownHostsFile
 Specifies one or more files to use for the user
 host key database, separated by whitespace.
 The default is
 .Pa ~/.ssh/known_hosts ,
 .Pa ~/.ssh/known_hosts2 .
+.It Cm VACertificateFile
+File with X.509 certificates in PEM format concatenated together.
+In use when
+.Cm VAType
+is set to
+.Cm ocspspec .
+The default value is
+.Sq
+..
+(empty).
+Certificates from that file explicitly trust
+.Sq "OCSP Responder"
+public key.
+They are used as trusted certificates in addition to certificates from
+.Cm CACertificateFile
+,
+.Cm CACertificatePath
+,
+.Cm UserCACertificateFile
+and
+.Cm UserCACertificatePath
+to verify responder certificate.
+.It Cm VAType
+Specifies whether
+.Sq "Online Certificate Status Protocol"
+(OCSP) is used to validate X.509 certificates.
+Accepted values are case insensitive:
+.Bl -tag -offset indent -compact
+.It none
+do not use OCSP to validate certificates;
+.It ocspcert
+validate only certificates that specify
+.Sq "OCSP Service Locator"
+URL;
+.It ocspspec
+use specified in the configuration
+.Sq "OCSP Responder"
+to validate all certificates.
+.El
+The default is
+.Cm none .
+.It Cm VAOCSPResponderURL
+.Sq "Access Location"
+/
+.Sq "OCSP Service Locator"
+URL of the OCSP provider. In use when
+.Cm VAType
+is set to
+.Cm ocspspec .
 .It Cm VerifyHostKeyDNS
-Specifies whether to verify the remote key using DNS and SSHFP resource
+Specifies whether to verify the remote key using DNS and CERT/SSHFP resource
 records.
 If this option is set to
 .Cm yes ,
@@ -1652,6 +1844,66 @@ If this flag is set to
 (the default),
 no fingerprint strings are printed at login and
 only the fingerprint string will be printed for unknown host keys.
+.It Cm X509KeyAlgorithm
+Specifies how X.509 certificates and signatures are used for protocol version 2.
+It is possible to have multiple algorithms
+in form specified in
+.Sx X509 Key Algorithms Format
+section of
+.Xr sshd_config 5 .
+Programs use the first listed for
+.Cm RSA ,
+.Cm DSA
+or
+.Cm ECDSA
+key in signing and accept all listed.
+.Pp
+The default for certificates with ECDSA keys is:
+.Bl -item -offset indent -compact
+.It
+.Cm X509KeyAlgorithm
+.Sm off
+.Ar x509v3-ecdsa-sha2-nistp256 , Ar sha256 , Ar ecdsa-sha2-nistp256
+.Sm on
+.It
+.Cm X509KeyAlgorithm
+.Sm off
+.Ar x509v3-ecdsa-sha2-nistp384 , Ar sha384 , Ar ecdsa-sha2-nistp384
+.Sm on
+.It
+.Cm X509KeyAlgorithm
+.Sm off
+.Ar x509v3-ecdsa-sha2-nistp521 , Ar sha512 , Ar ecdsa-sha2-nistp521
+.Sm on
+.El
+The default for certificates with RSA key is:
+.Bl -item -offset indent -compact
+.It
+.Cm X509KeyAlgorithm
+.Sm off
+.Ar x509v3-sign-rsa , Ar rsa-sha1
+.Sm on
+.It
+.Cm X509KeyAlgorithm
+.Sm off
+.Ar x509v3-sign-rsa , Ar rsa-md5
+.Sm on
+.El
+.Pp
+The default for certificates with DSA key is:
+.Bl -item -offset indent -compact
+.It
+.Cm X509KeyAlgorithm
+.Sm off
+.Ar x509v3-sign-dss , Ar dss-asn1
+.Sm on
+.It
+.Cm X509KeyAlgorithm
+.Sm off
+.Ar x509v3-sign-dss , Ar dss-raw
+.Sm on
+.El
+.Pp
 .It Cm XAuthLocation
 Specifies the full pathname of the
 .Xr xauth 1
@@ -1776,3 +2028,5 @@ removed many bugs, re-added newer features and
 created OpenSSH.
 .An Markus Friedl
 contributed the support for SSH protocol versions 1.5 and 2.0.
+.An Roumen Petrov
+contributed support for X.509 certificates.

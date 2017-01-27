@@ -125,11 +125,13 @@ openpty(int *amaster, int *aslave, char *name, struct termios *termp,
 	 * Try to push the appropriate streams modules, as described
 	 * in Solaris pts(7).
 	 */
+# ifndef __ANDROID__
 	ioctl(*aslave, I_PUSH, "ptem");
 	ioctl(*aslave, I_PUSH, "ldterm");
 # ifndef __hpux
 	ioctl(*aslave, I_PUSH, "ttcompat");
 # endif /* __hpux */
+# endif /*ndef __ANDROID__*/
 
 	return (0);
 

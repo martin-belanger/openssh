@@ -12,6 +12,7 @@
  */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
+ * Copyright (c) 2004,2011 Roumen Petrov.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -51,6 +52,7 @@
 #endif
 
 #include "log.h"
+#include <openssl/err.h>
 
 static LogLevel log_level = SYSLOG_LEVEL_INFO;
 static int log_on_stderr = 1;
@@ -64,6 +66,32 @@ extern char *__progname;
 
 #define LOG_SYSLOG_VIS	(VIS_CSTYLE|VIS_NL|VIS_TAB|VIS_OCTAL)
 #define LOG_STDERR_VIS	(VIS_SAFE|VIS_OCTAL)
+
+#ifdef __ANDROID__
+#include <android/log.h>
+
+static void
+android_log(LogLevel level, const char *msg, void *ctx) {
+	android_LogPriority a;
+
+	(void)ctx;
+
+	switch (level) {
+	case SYSLOG_LEVEL_QUIET		: a = ANDROID_LOG_SILENT	; break;
+	case SYSLOG_LEVEL_FATAL		: a = ANDROID_LOG_FATAL		; break;
+	case SYSLOG_LEVEL_ERROR		: a = ANDROID_LOG_ERROR		; break;
+	case SYSLOG_LEVEL_INFO		: a = ANDROID_LOG_WARN		; break;
+	case SYSLOG_LEVEL_VERBOSE	: a = ANDROID_LOG_INFO		; break;
+	case SYSLOG_LEVEL_DEBUG1	: a = ANDROID_LOG_DEBUG		; break;
+	case SYSLOG_LEVEL_DEBUG2	: a = ANDROID_LOG_DEBUG		; break;
+	case SYSLOG_LEVEL_DEBUG3	: a = ANDROID_LOG_VERBOSE	; break;
+	default				: a = ANDROID_LOG_UNKNOWN	; break;
+	}
+
+	if (a != ANDROID_LOG_UNKNOWN)
+		__android_log_write(a, __progname, msg);
+}
+#endif /*def __ANDROID__*/
 
 /* textual representation of log-facilities/levels */
 
@@ -280,6 +308,9 @@ log_init(char *av0, LogLevel level, SyslogFacility facility, int on_stderr)
 	if (on_stderr)
 		return;
 
+#ifdef __ANDROID__
+	log_handler = android_log;
+#endif
 	switch (facility) {
 	case SYSLOG_FACILITY_DAEMON:
 		log_facility = LOG_DAEMON;
@@ -368,6 +399,22 @@ log_redirect_stderr_to(const char *logfile)
 	}
 	log_stderr_fd = fd;
 }
+
+LogLevel
+get_log_level(void) {
+	return log_level;
+}
+
+
+char*
+openssl_errormsg(char *buf, size_t len) {
+	ERR_error_string_n(ERR_get_error(), buf, len);
+
+	/* clear rest of errors in OpenSSL "error buffer" */
+	ERR_clear_error();
+	return(buf);
+}
+
 
 #define MSGBUFSIZ 1024
 
@@ -458,11 +505,11 @@ do_log(LogLevel level, const char *fmt, va_list args)
 	} else {
 #if defined(HAVE_OPENLOG_R) && defined(SYSLOG_DATA_INIT)
 		openlog_r(argv0 ? argv0 : __progname, LOG_PID, log_facility, &sdata);
-		syslog_r(pri, &sdata, "%.500s", fmtbuf);
+		syslog_r(pri, &sdata, "%.1000s", fmtbuf);
 		closelog_r(&sdata);
 #else
 		openlog(argv0 ? argv0 : __progname, LOG_PID, log_facility);
-		syslog(pri, "%.500s", fmtbuf);
+		syslog(pri, "%.1000s", fmtbuf);
 		closelog();
 #endif
 	}

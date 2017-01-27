@@ -1,6 +1,8 @@
 /* $OpenBSD: ssh_api.c,v 1.7 2016/05/04 14:22:33 markus Exp $ */
 /*
  * Copyright (c) 2012 Markus Friedl.  All rights reserved.
+ * X.509 certificates support,
+ * Copyright (c) 2014 Roumen Petrov.  All rights reserved.
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -36,8 +38,8 @@ int	_ssh_send_banner(struct ssh *, char **);
 int	_ssh_read_banner(struct ssh *, char **);
 int	_ssh_order_hostkeyalgs(struct ssh *);
 int	_ssh_verify_host_key(struct sshkey *, struct ssh *);
-struct sshkey *_ssh_host_public_key(int, int, struct ssh *);
-struct sshkey *_ssh_host_private_key(int, int, struct ssh *);
+struct sshkey *_ssh_host_public_key(const char*, struct ssh *);
+struct sshkey *_ssh_host_private_key(const char*, struct ssh *);
 int	_ssh_host_key_sign(struct sshkey *, struct sshkey *,
     u_char **, size_t *, const u_char *, size_t, const char *, u_int);
 
@@ -111,8 +113,8 @@ ssh_init(struct ssh **sshp, int is_server, struct kex_params *kex_params)
 # endif
 #endif /* WITH_OPENSSL */
 		ssh->kex->kex[KEX_C25519_SHA256] = kexc25519_server;
-		ssh->kex->load_host_public_key=&_ssh_host_public_key;
-		ssh->kex->load_host_private_key=&_ssh_host_private_key;
+		ssh->kex->find_host_public_key=&_ssh_host_public_key;
+		ssh->kex->find_host_private_key=&_ssh_host_private_key;
 		ssh->kex->sign=&_ssh_host_key_sign;
 	} else {
 #ifdef WITH_OPENSSL
@@ -436,30 +438,28 @@ _ssh_exchange_banner(struct ssh *ssh)
 }
 
 struct sshkey *
-_ssh_host_public_key(int type, int nid, struct ssh *ssh)
+_ssh_host_public_key(const char* pkalg, struct ssh *ssh)
 {
 	struct key_entry *k;
 
-	debug3("%s: need %d", __func__, type);
+	debug3("%s: need %s", __func__, pkalg);
 	TAILQ_FOREACH(k, &ssh->public_keys, next) {
 		debug3("%s: check %s", __func__, sshkey_type(k->key));
-		if (k->key->type == type &&
-		    (type != KEY_ECDSA || k->key->ecdsa_nid == nid))
+		if (sshkey_match_pkalg(k->key, pkalg))
 			return (k->key);
 	}
 	return (NULL);
 }
 
 struct sshkey *
-_ssh_host_private_key(int type, int nid, struct ssh *ssh)
+_ssh_host_private_key(const char* pkalg, struct ssh *ssh)
 {
 	struct key_entry *k;
 
-	debug3("%s: need %d", __func__, type);
+	debug3("%s: need %s", __func__, pkalg);
 	TAILQ_FOREACH(k, &ssh->private_keys, next) {
 		debug3("%s: check %s", __func__, sshkey_type(k->key));
-		if (k->key->type == type &&
-		    (type != KEY_ECDSA || k->key->ecdsa_nid == nid))
+		if (sshkey_match_pkalg(k->key, pkalg))
 			return (k->key);
 	}
 	return (NULL);
